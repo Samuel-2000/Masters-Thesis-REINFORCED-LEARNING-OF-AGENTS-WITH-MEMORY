@@ -45,7 +45,7 @@ class Agent:
         # Create network based on type with consistent sizes
         if network_type == 'lstm':
             self.network = LSTMPolicyNet(
-                vocab_size=VOCAB_SIZE,  # Always 20 tokens
+                vocab_size=VOCAB_SIZE,  # Now 19 tokens (0-18)
                 embed_dim=hidden_size,
                 observation_size=observation_size,  # Always 10
                 hidden_size=hidden_size,
@@ -54,7 +54,7 @@ class Agent:
             )
         elif network_type == 'transformer':
             self.network = TransformerPolicyNet(
-                vocab_size=VOCAB_SIZE,
+                vocab_size=VOCAB_SIZE,  # Now 19 tokens
                 embed_dim=hidden_size,
                 observation_size=observation_size,
                 hidden_size=hidden_size,
@@ -66,7 +66,7 @@ class Agent:
             )
         elif network_type == 'multimemory':
             self.network = MultiMemoryPolicyNet(
-                vocab_size=VOCAB_SIZE,
+                vocab_size=VOCAB_SIZE,  # Now 19 tokens
                 embed_dim=hidden_size,
                 observation_size=observation_size,
                 hidden_size=hidden_size,
@@ -85,12 +85,12 @@ class Agent:
         print(f"Created {network_type} agent:")
         print(f"  Observation size: {observation_size}")
         print(f"  Action size: {action_size}")
-        print(f"  Vocab size: {VOCAB_SIZE}")
+        print(f"  Vocab size: {VOCAB_SIZE} (tokens 0-{VOCAB_SIZE-1})")
         print(f"  Device: {device}")
     
     def _validate_observation_range(self):
         """Validate that observation tokens are within expected range"""
-        max_token = ObservationTokens.ENERGY_LEVEL_5  # Should be 19
+        max_token = ObservationTokens.ENERGY_LEVEL_4  # Should be 18
         if max_token != VOCAB_SIZE - 1:
             raise ValueError(f"Observation token range mismatch: "
                            f"max_token={max_token}, VOCAB_SIZE={VOCAB_SIZE}")

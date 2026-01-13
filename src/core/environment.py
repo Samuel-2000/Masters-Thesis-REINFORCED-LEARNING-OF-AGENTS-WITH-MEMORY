@@ -15,7 +15,7 @@ from .constants import (
     ObservationTokens, OBSERVATION_SIZE, NEIGHBOR_POSITIONS,
     ACTION_TOKEN_POSITION, ENERGY_TOKEN_POSITION, VOCAB_SIZE,
     # Action constants
-    Actions, NUM_ACTIONS,
+    Actions, NUM_ACTIONS, ENV_ACTIONS_START,
     # Tile constants
     TileType, TILE_COLORS,
     # Task classes
@@ -23,7 +23,9 @@ from .constants import (
     # Default parameters
     DEFAULT_GRID_SIZE, DEFAULT_MAX_STEPS, DEFAULT_OBSTACLE_FRACTION,
     DEFAULT_FOOD_SOURCES, DEFAULT_FOOD_ENERGY, DEFAULT_INITIAL_ENERGY,
-    DEFAULT_ENERGY_DECAY, DEFAULT_ENERGY_PER_STEP
+    DEFAULT_ENERGY_DECAY, DEFAULT_ENERGY_PER_STEP,
+    # Mapping functions
+    action_to_token, grid_tile_to_observation_token
 )
 
 
@@ -213,12 +215,12 @@ def get_observation_optimized(
     last_action: int, 
     energy: float,
     food_positions_cache: np.ndarray,
-    door_open_array: np.ndarray  # 2D array where 1=open, 0=closed
+    door_open_array: np.ndarray
 ) -> np.ndarray:
     """
-    JIT-compiled observation generation with UNIQUE tokens 0-19
+    JIT-compiled observation generation with tokens 0-18
     
-    Returns observation of length 10 with tokens 0-19
+    Returns observation of length 10 with tokens 0-18
     """
     obs = np.empty(10, dtype=np.int32)  # Always 10 observations
     grid_h, grid_w = grid.shape
@@ -228,7 +230,7 @@ def get_observation_optimized(
                         [0, -1], [0, 1],
                         [1, -1], [1, 0], [1, 1]], dtype=np.int32)
     
-    # Process 8 neighbor positions
+    # Process 8 neighbor positions (tokens 0-6)
     for i in range(8):
         ny = y + offsets[i, 0]
         nx = x + offsets[i, 1]
@@ -239,49 +241,49 @@ def get_observation_optimized(
             # Check if position has food using cache
             if food_positions_cache[ny, nx] > 0:
                 obs[i] = 3  # NEIGHBOR_FOOD
-            # Check if it's a door and adjust based on state
-            elif grid_val == 5 or grid_val == 6:  # DOOR_CLOSED or DOOR_OPEN
+            # Check if it's a door
+            elif grid_val == TileType.DOOR_CLOSED or grid_val == TileType.DOOR_OPEN:
                 if door_open_array[ny, nx] == 1:
                     obs[i] = 5  # NEIGHBOR_DOOR_OPEN
                 else:
                     obs[i] = 4  # NEIGHBOR_DOOR_CLOSED
-            # Map other tile types to observation tokens
-            elif grid_val == 1:  # OBSTACLE
+            # Map other tile types - BUTTON and BUTTON_BROKEN look the same!
+            elif grid_val == TileType.OBSTACLE:
                 obs[i] = 1  # NEIGHBOR_OBSTACLE
-            elif grid_val == 7:  # BUTTON
-                obs[i] = 6  # NEIGHBOR_BUTTON
-            elif grid_val == 8:  # BUTTON_BROKEN
-                obs[i] = 7  # NEIGHBOR_BUTTON_BROKEN
-            elif grid_val == 2:  # FOOD_SOURCE
+            elif grid_val == TileType.BUTTON or grid_val == TileType.BUTTON_BROKEN:
+                obs[i] = 6  # NEIGHBOR_BUTTON (both working and broken)
+            elif grid_val == TileType.FOOD_SOURCE:
                 obs[i] = 2  # NEIGHBOR_FOOD_SOURCE
-            else:  # EMPTY or other (0, 4=AGENT shouldn't appear in neighbors)
+            else:  # EMPTY or AGENT
                 obs[i] = 0  # NEIGHBOR_EMPTY
         else:
             # Out of bounds = obstacle
             obs[i] = 1  # NEIGHBOR_OBSTACLE
     
-    # Position 8: Last action token (8-13)
+    # Position 8: Last action token (7-13)
     # Map action index to token
-    if last_action == 0:  # LEFT
-        obs[8] = 8
-    elif last_action == 1:  # RIGHT
-        obs[8] = 9
-    elif last_action == 2:  # UP
-        obs[8] = 10
-    elif last_action == 3:  # DOWN
-        obs[8] = 11
-    elif last_action == 4:  # STAY
-        obs[8] = 12
-    else:  # START (5) or other
-        obs[8] = 13
+    if last_action == Actions.LEFT:  # 0
+        obs[8] = 7  # ACTION_LEFT
+    elif last_action == Actions.RIGHT:  # 1
+        obs[8] = 8  # ACTION_RIGHT
+    elif last_action == Actions.UP:  # 2
+        obs[8] = 9  # ACTION_UP
+    elif last_action == Actions.DOWN:  # 3
+        obs[8] = 10  # ACTION_DOWN
+    elif last_action == Actions.STAY:  # 4
+        obs[8] = 11  # ACTION_STAY
+    elif last_action == Actions.BUTTON:  # 5
+        obs[8] = 12  # ACTION_BUTTON
+    else:  # Environment START (6) or other
+        obs[8] = 13  # ACTION_START
     
-    # Position 9: Energy level token (14-19)
-    # Scale energy (0-100) to 0-5, then add 14
-    energy_scaled = int((energy / 100.0) * 6)
+    # Position 9: Energy level token (14-18)
+    # Scale energy (0-100) to 0-4, then add 14
+    energy_scaled = int((energy / 100.0) * 5)  # 0-4
     if energy_scaled < 0:
         energy_scaled = 0
-    elif energy_scaled > 5:
-        energy_scaled = 5
+    elif energy_scaled > 4:
+        energy_scaled = 4
     obs[9] = 14 + energy_scaled  # ENERGY_LEVEL_0 = 14
     
     return obs
@@ -337,11 +339,11 @@ class GridMazeWorld(gym.Env):
         # Calculate obstacle count
         self.n_obstacles = int((grid_size - 2) ** 2 * obstacle_fraction)
         
-        # Define action and observation spaces (ALWAYS THE SAME!)
-        self.action_space = spaces.Discrete(NUM_ACTIONS)
+        # Define action and observation spaces
+        self.action_space = spaces.Discrete(NUM_ACTIONS)  # 6 agent actions
         self.observation_space = spaces.Box(
             low=0, 
-            high=VOCAB_SIZE - 1,  # Max token value (19)
+            high=VOCAB_SIZE - 1,  # Max token value (18)
             shape=(OBSERVATION_SIZE,), 
             dtype=np.int32
         )
@@ -350,7 +352,7 @@ class GridMazeWorld(gym.Env):
         self.grid = None
         self.food_sources = None
         self.food_positions_cache = None
-        self.door_open_array = None  # 2D array tracking open doors
+        self.door_open_array = None
         self.agent_pos = None
         self.energy = None
         self.steps = None
@@ -370,14 +372,12 @@ class GridMazeWorld(gym.Env):
     def _adjust_parameters_by_task_class(self):
         """Adjust environment parameters based on task class and complexity level"""
         if self.task_class == TaskClass.BASIC:
-            # Basic task: no doors or buttons
             self.n_doors = 0
             self.n_buttons_per_door = 0
             self.button_break_probability = 0.0
             self.door_periodic = False
             
         elif self.task_class == TaskClass.DOORS:
-            # Task with periodic doors only
             if self.n_doors == 0:
                 self.n_doors = max(1, int(self.complexity_level * 3))
             self.n_buttons_per_door = 0
@@ -385,7 +385,6 @@ class GridMazeWorld(gym.Env):
             self.door_periodic = True
             
         elif self.task_class == TaskClass.BUTTONS:
-            # Task with doors and buttons
             if self.n_doors == 0:
                 self.n_doors = max(1, int(self.complexity_level * 3))
             if self.n_buttons_per_door == 0:
@@ -394,7 +393,6 @@ class GridMazeWorld(gym.Env):
             self.door_periodic = False
             
         elif self.task_class == TaskClass.COMPLEX:
-            # Complex task with all features
             if self.n_doors == 0:
                 self.n_doors = max(2, int(self.complexity_level * 4))
             if self.n_buttons_per_door == 0:
@@ -443,7 +441,7 @@ class GridMazeWorld(gym.Env):
         self.energy = self.initial_energy
         self.steps = 0
         self.done = False
-        self.last_action = Actions.START
+        self.last_action = ENV_ACTIONS_START  # Environment START action
         
         info = {
             'energy': self.energy,
@@ -466,6 +464,7 @@ class GridMazeWorld(gym.Env):
             print(f"  Agent pos: {self.agent_pos}")
             print(f"  Initial obs: {obs}")
             print(f"  Obs range: {obs.min()} to {obs.max()}")
+            print(f"  VOCAB_SIZE: {VOCAB_SIZE}")
         
         return obs, info
     
@@ -603,21 +602,28 @@ class GridMazeWorld(gym.Env):
                 self.grid[door.y, door.x] = TileType.DOOR_CLOSED
                 self.door_open_array[door.y, door.x] = 0
     
-    def _check_button_press(self, y: int, x: int) -> bool:
-        """Check if agent is on a button and handle press"""
+    def _check_button_press(self, button_y: int, button_x: int) -> bool:
+        """Check if button at position (button_y, button_x) can be pressed"""
         for button in self.buttons:
-            if button.y == y and button.x == x:
-                if button.press():
-                    # Update grid if button breaks
+            if button.y == button_y and button.x == button_x:
+                # Agent can try to press ANY button (working or broken)
+                # But only working buttons actually do something
+                if button.press():  # This updates broken state if needed
+                    # If button is broken, pressing does nothing
                     if button.is_broken:
-                        self.grid[y, x] = TileType.BUTTON_BROKEN
+                        # Visual feedback: broken buttons stay the same
+                        self.grid[button_y, button_x] = TileType.BUTTON_BROKEN
+                        return False  # Button press failed
                     
-                    # Try to open the associated door
+                    # Working button: try to open the associated door
                     if 0 <= button.door_idx < len(self.doors):
                         door = self.doors[button.door_idx]
                         if door.open():
                             self.door_open_array[door.y, door.x] = 1
                             return True
+                else:
+                    # Button was already broken
+                    return False
                 break
         return False
     
@@ -633,9 +639,20 @@ class GridMazeWorld(gym.Env):
             TileType.EMPTY,
             TileType.DOOR_OPEN,
             TileType.FOOD,
+            TileType.FOOD_SOURCE,
             TileType.BUTTON,
             TileType.BUTTON_BROKEN
         ]
+    
+    def _get_adjacent_button_positions(self, y: int, x: int) -> List[Tuple[int, int]]:
+        """Get positions of buttons adjacent to (y, x)"""
+        adjacent = []
+        for dy, dx in [(-1, 0), (1, 0), (0, -1), (0, 1), (0, 0)]:  # Include current cell
+            ny, nx = y + dy, x + dx
+            if 0 <= ny < self.grid_size and 0 <= nx < self.grid_size:
+                if self.grid[ny, nx] in [TileType.BUTTON, TileType.BUTTON_BROKEN]:
+                    adjacent.append((ny, nx))
+        return adjacent
     
     def step(self, action: int) -> Tuple[np.ndarray, float, bool, bool, Dict]:
         """Step function with consistent observation space"""
@@ -643,36 +660,55 @@ class GridMazeWorld(gym.Env):
             obs = self._get_observation()
             return obs, 0.0, True, True, {}
         
+        # Validate action
+        if not (0 <= action < NUM_ACTIONS):
+            raise ValueError(f"Invalid action: {action}. Must be 0-{NUM_ACTIONS-1}")
+        
         # Update door states first
         self._update_door_states()
         
-        # Move agent
+        # Handle different action types
+        button_pressed = False
+        moved = False
         y, x = self.agent_pos
         
-        if action == Actions.LEFT:
-            if x > 0 and self._can_move_to(y, x-1):
-                x -= 1
-        elif action == Actions.RIGHT:
-            if x < self.grid_size-1 and self._can_move_to(y, x+1):
-                x += 1
-        elif action == Actions.UP:
-            if y > 0 and self._can_move_to(y-1, x):
-                y -= 1
-        elif action == Actions.DOWN:
-            if y < self.grid_size-1 and self._can_move_to(y+1, x):
-                y += 1
+        if action == Actions.BUTTON:
+            # BUTTON action: try to press adjacent buttons
+            adjacent_buttons = self._get_adjacent_button_positions(y, x)
+            for by, bx in adjacent_buttons:
+                if self._check_button_press(by, bx):
+                    button_pressed = True
+                    break
+            # Agent doesn't move when pressing button
+        else:
+            # Movement actions
+            moved = True
+            if action == Actions.LEFT:
+                if x > 0 and self._can_move_to(y, x-1):
+                    x -= 1
+            elif action == Actions.RIGHT:
+                if x < self.grid_size-1 and self._can_move_to(y, x+1):
+                    x += 1
+            elif action == Actions.UP:
+                if y > 0 and self._can_move_to(y-1, x):
+                    y -= 1
+            elif action == Actions.DOWN:
+                if y < self.grid_size-1 and self._can_move_to(y+1, x):
+                    y += 1
+            # STAY action: agent doesn't move
         
-        # Check for button press
-        button_pressed = self._check_button_press(y, x)
+        # Update agent position if moved
+        if moved:
+            self.agent_pos = np.array([y, x])
         
-        self.agent_pos = np.array([y, x])
-        
-        # Process food
-        energy_gained = food_step(y, x, self.food_sources, self.food_energy)
-        
-        # Update food cache if food was collected
-        if energy_gained > 0:
-            self.food_positions_cache[y, x] = 0
+        # Process food if agent moved onto food
+        energy_gained = 0.0
+        if moved:
+            energy_gained = food_step(y, x, self.food_sources, self.food_energy)
+            
+            # Update food cache if food was collected
+            if energy_gained > 0:
+                self.food_positions_cache[y, x] = 0
         
         # Update energy
         self.energy = (self.energy * self.energy_decay + 
@@ -683,7 +719,7 @@ class GridMazeWorld(gym.Env):
         
         # Update state
         self.steps += 1
-        self.last_action = action
+        self.last_action = action  # Store the action taken
         
         # Check termination
         terminated = (self.steps >= self.max_steps or self.energy <= 0)
@@ -694,8 +730,14 @@ class GridMazeWorld(gym.Env):
         reward = 0.01  # Survival reward per step
         if energy_gained > 0:
             reward += 1.0  # Food collection reward
-        if button_pressed:
-            reward += 0.5  # Button press reward
+        if action == Actions.BUTTON:
+            if button_pressed:
+                reward += 0.5  # Successful button press reward
+            else:
+                # Small penalty for pressing a non-working button
+                # Helps agent learn button press isn't always effective
+                reward -= 0.1
+        
         if self.energy < 10:
             reward -= 0.1  # Low energy penalty
         
@@ -707,7 +749,7 @@ class GridMazeWorld(gym.Env):
         obs = self._get_observation()
         
         if self.debug and self.steps % 10 == 0:
-            print(f"Step {self.steps}: action={action}, reward={reward:.3f}, energy={self.energy:.1f}")
+            print(f"Step {self.steps}: action={Actions(action).name}, reward={reward:.3f}, energy={self.energy:.1f}")
             print(f"  Observation: {obs}")
         
         info = {
@@ -716,6 +758,7 @@ class GridMazeWorld(gym.Env):
             'position': self.agent_pos.copy(),
             'food_collected': energy_gained > 0,
             'button_pressed': button_pressed,
+            'action_taken': action,
             'task_class': self.task_class,
             'complexity_level': self.complexity_level,
             'n_doors_active': sum(1 for d in self.doors if d.can_be_opened),
@@ -787,9 +830,6 @@ class GridMazeWorld(gym.Env):
         if hasattr(self, '_render_buffer'):
             self._render_buffer = None
         cv2.destroyAllWindows()
-
-
-
 
 
 # vectorized environment alternative

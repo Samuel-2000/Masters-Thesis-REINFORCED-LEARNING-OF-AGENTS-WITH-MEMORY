@@ -1,47 +1,48 @@
 """
 Constants for Maze RL - centralized definitions for observations, actions, and tokens
-ALL TOKENS ARE UNIQUE (0-19)
+NO UNUSED TOKENS - 0-18 (19 tokens total)
 """
 
 from enum import IntEnum
 from typing import Dict, Tuple
 
 # ============================================================================
-# OBSERVATION TOKENS (0-19) - ALL UNIQUE!
+# OBSERVATION TOKENS (0-18) - ALL UNIQUE, NO GAPS!
 # ============================================================================
 
 class ObservationTokens(IntEnum):
-    """Observation token values (0-19) - ALL UNIQUE!"""
+    """Observation token values (0-18) - ALL UNIQUE, NO GAPS!"""
     
-    # Neighbor observations (8 positions) - Tokens 0-7
+    # Neighbor observations (8 positions) - Tokens 0-6
     NEIGHBOR_EMPTY = 0
     NEIGHBOR_OBSTACLE = 1
     NEIGHBOR_FOOD_SOURCE = 2
     NEIGHBOR_FOOD = 3
     NEIGHBOR_DOOR_CLOSED = 4
     NEIGHBOR_DOOR_OPEN = 5
-    NEIGHBOR_BUTTON = 6
-    NEIGHBOR_BUTTON_BROKEN = 7
+    NEIGHBOR_BUTTON = 6  # All buttons look the same (broken or working)
     
-    # Action tokens - Tokens 8-13 (6 actions)
-    ACTION_LEFT = 8
-    ACTION_RIGHT = 9
-    ACTION_UP = 10
-    ACTION_DOWN = 11
-    ACTION_STAY = 12
-    ACTION_START = 13
+    # Action tokens - Tokens 7-12 (6 actions)
+    ACTION_LEFT = 7
+    ACTION_RIGHT = 8
+    ACTION_UP = 9
+    ACTION_DOWN = 10
+    ACTION_STAY = 11
+    ACTION_BUTTON = 12  # Explicit button push
     
-    # Energy level tokens - Tokens 14-19 (6 levels)
-    ENERGY_LEVEL_0 = 14  # 0-16.7%
-    ENERGY_LEVEL_1 = 15  # 16.7-33.3%
-    ENERGY_LEVEL_2 = 16  # 33.3-50%
-    ENERGY_LEVEL_3 = 17  # 50-66.7%
-    ENERGY_LEVEL_4 = 18  # 66.7-83.3%
-    ENERGY_LEVEL_5 = 19  # 83.3-100%
+    # Environment-only action token
+    ACTION_START = 13  # Used by environment at reset
+    
+    # Energy level tokens - Tokens 14-18 (5 levels)
+    ENERGY_LEVEL_0 = 14  # 0-20%
+    ENERGY_LEVEL_1 = 15  # 20-40%
+    ENERGY_LEVEL_2 = 16  # 40-60%
+    ENERGY_LEVEL_3 = 17  # 60-80%
+    ENERGY_LEVEL_4 = 18  # 80-100%
 
-# Vocabulary size for embedding layer (0-19 = 20 tokens)
-VOCAB_SIZE = 20
-MAX_TOKEN = ObservationTokens.ENERGY_LEVEL_5  # Should be 19
+# Vocabulary size for embedding layer (0-18 = 19 tokens)
+VOCAB_SIZE = 19
+MAX_TOKEN = ObservationTokens.ENERGY_LEVEL_4  # Should be 18
 
 # ============================================================================
 # Observation structure
@@ -64,10 +65,14 @@ class Actions(IntEnum):
     UP = 2
     DOWN = 3
     STAY = 4
-    START = 5
+    BUTTON = 5  # Explicit button push action
+    
+# Environment internal action (not available to agent)
+ENV_ACTIONS_START = 6
 
-NUM_ACTIONS = len(Actions)
+NUM_ACTIONS = len(Actions)  # 6 agent actions
 ACTION_SIZE = NUM_ACTIONS
+TOTAL_ACTIONS = 7  # Agent actions (6) + environment START (1)
 
 # ============================================================================
 # TILE TYPE CONSTANTS (for grid representation)
@@ -83,7 +88,7 @@ class TileType(IntEnum):
     DOOR_CLOSED = 5
     DOOR_OPEN = 6
     BUTTON = 7
-    BUTTON_BROKEN = 8
+    BUTTON_BROKEN = 8  # Internal only - agent sees as BUTTON
 
 # ============================================================================
 # MAPPING FUNCTIONS
@@ -101,10 +106,8 @@ def grid_tile_to_observation_token(tile_value: int) -> int:
         return ObservationTokens.NEIGHBOR_DOOR_CLOSED
     elif tile_value == TileType.DOOR_OPEN:
         return ObservationTokens.NEIGHBOR_DOOR_OPEN
-    elif tile_value == TileType.BUTTON:
-        return ObservationTokens.NEIGHBOR_BUTTON
-    elif tile_value == TileType.BUTTON_BROKEN:
-        return ObservationTokens.NEIGHBOR_BUTTON_BROKEN
+    elif tile_value == TileType.BUTTON or tile_value == TileType.BUTTON_BROKEN:
+        return ObservationTokens.NEIGHBOR_BUTTON  # Both look the same to agent!
     else:  # EMPTY or AGENT (agent shouldn't be in neighbor observation)
         return ObservationTokens.NEIGHBOR_EMPTY
 
@@ -120,7 +123,9 @@ def action_to_token(action: int) -> int:
         return ObservationTokens.ACTION_DOWN
     elif action == Actions.STAY:
         return ObservationTokens.ACTION_STAY
-    elif action == Actions.START:
+    elif action == Actions.BUTTON:
+        return ObservationTokens.ACTION_BUTTON
+    elif action == ENV_ACTIONS_START:
         return ObservationTokens.ACTION_START
     else:
         raise ValueError(f"Unknown action: {action}")
@@ -137,24 +142,26 @@ def token_to_action(token: int) -> int:
         return Actions.DOWN
     elif token == ObservationTokens.ACTION_STAY:
         return Actions.STAY
+    elif token == ObservationTokens.ACTION_BUTTON:
+        return Actions.BUTTON
     elif token == ObservationTokens.ACTION_START:
-        return Actions.START
+        return ENV_ACTIONS_START
     else:
         raise ValueError(f"Token {token} is not an action token")
 
 def energy_to_token(energy: float, max_energy: float = 100.0) -> int:
-    """Convert continuous energy to discrete token (14-19)"""
-    # Scale 0-100 to 0-5, then add 14
-    scaled = int((energy / max_energy) * 6)  # 6 energy levels (0-5)
-    scaled = max(0, min(5, scaled))  # Clamp to 0-5
+    """Convert continuous energy to discrete token (14-18)"""
+    # Scale 0-100 to 0-4, then add 14
+    scaled = int((energy / max_energy) * 5)  # 5 energy levels (0-4)
+    scaled = max(0, min(4, scaled))  # Clamp to 0-4
     return ObservationTokens.ENERGY_LEVEL_0 + scaled
 
 def token_to_energy(token: int, max_energy: float = 100.0) -> float:
     """Convert token back to approximate energy value"""
-    if ObservationTokens.ENERGY_LEVEL_0 <= token <= ObservationTokens.ENERGY_LEVEL_5:
+    if ObservationTokens.ENERGY_LEVEL_0 <= token <= ObservationTokens.ENERGY_LEVEL_4:
         level = token - ObservationTokens.ENERGY_LEVEL_0
         # Return midpoint of energy range
-        energy_range = max_energy / 6
+        energy_range = max_energy / 5
         return (level + 0.5) * energy_range
     return max_energy / 2  # Default if token invalid
 
@@ -208,18 +215,33 @@ TILE_COLORS = {
 # ============================================================================
 
 def validate_observation_tokens():
-    """Validate that all tokens are unique"""
+    """Validate that all tokens are unique and contiguous"""
     tokens = set()
     for member in ObservationTokens:
         if member.value in tokens:
             raise ValueError(f"Duplicate token value: {member.name} = {member.value}")
         tokens.add(member.value)
     
-    # Check all tokens are in range 0-19
-    if min(tokens) < 0 or max(tokens) >= VOCAB_SIZE:
-        raise ValueError(f"Tokens out of range [0, {VOCAB_SIZE-1}]: min={min(tokens)}, max={max(tokens)}")
+    # Check all tokens are in range 0-18
+    expected_tokens = set(range(VOCAB_SIZE))
+    missing_tokens = expected_tokens - tokens
+    extra_tokens = tokens - expected_tokens
+    
+    if missing_tokens:
+        print(f"⚠️  Missing tokens: {sorted(missing_tokens)}")
+    
+    if extra_tokens:
+        print(f"⚠️  Extra tokens: {sorted(extra_tokens)}")
     
     print(f"✓ All {len(tokens)} tokens are unique (0-{max(tokens)})")
+    print(f"✓ Vocabulary size: {VOCAB_SIZE}")
+    
+    # Verify the token sequence has no gaps
+    sorted_tokens = sorted(tokens)
+    for i in range(len(sorted_tokens) - 1):
+        if sorted_tokens[i + 1] != sorted_tokens[i] + 1:
+            print(f"⚠️  Gap found between {sorted_tokens[i]} and {sorted_tokens[i + 1]}")
+    
     return True
 
 # Run validation when module is imported

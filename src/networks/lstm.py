@@ -17,11 +17,11 @@ class LSTMPolicyNet(BaseNetwork):  # Inherit from BaseNetwork
     
 
     def __init__(self,
-                 vocab_size: int = VOCAB_SIZE,  # Was 20
+                 vocab_size: int = VOCAB_SIZE,  # Was 20, now 19
                  embed_dim: int = 512,
-                 observation_size: int = OBSERVATION_SIZE,  # Was 10
+                 observation_size: int = OBSERVATION_SIZE,  # Always 10
                  hidden_size: int = 512,
-                 action_size: int = ACTION_SIZE,  # Was 6
+                 action_size: int = ACTION_SIZE,  # Always 6
                  num_layers: int = 1,
                  dropout: float = 0.1,
                  use_auxiliary: bool = False):
@@ -65,7 +65,7 @@ class LSTMPolicyNet(BaseNetwork):  # Inherit from BaseNetwork
             dropout=dropout if num_layers > 1 else 0.0
         )
         
-        # Policy head (logits)
+        # Policy head (logits) - OUTPUTS 6 ACTIONS
         self.head = nn.Linear(hidden_size, action_size)
         
         # Auxiliary heads (if needed)
@@ -106,6 +106,12 @@ class LSTMPolicyNet(BaseNetwork):  # Inherit from BaseNetwork
         if x.dtype != torch.long:
             x = x.long()
         
+        # Validate token range
+        x_min, x_max = x.min().item(), x.max().item()
+        if x_min < 0 or x_max >= self.vocab_size:
+            raise ValueError(f"Input tokens out of range [0, {self.vocab_size-1}]: "
+                           f"min={x_min}, max={x_max}")
+        
         # Embed tokens: [B, T, K, D]
         x_embed = self.embedding(x)
         
@@ -126,7 +132,7 @@ class LSTMPolicyNet(BaseNetwork):  # Inherit from BaseNetwork
         
         out, self.hidden_state = self.lstm(aggregated, self.hidden_state)
         
-        # Get logits
+        # Get logits - should be [B, T, 6] (6 actions)
         logits = self.head(out)
         
         # Return auxiliary predictions if requested
