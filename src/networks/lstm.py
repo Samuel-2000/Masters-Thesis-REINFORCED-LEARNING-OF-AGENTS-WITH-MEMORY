@@ -9,19 +9,22 @@ import torch.nn.functional as F
 from typing import Optional, Tuple
 from .base import BaseNetwork
 
+from src.core.constants import VOCAB_SIZE, OBSERVATION_SIZE, ACTION_SIZE
+
 
 class LSTMPolicyNet(BaseNetwork):  # Inherit from BaseNetwork
-    """LSTM-based policy network - Matching original MemoryPolicyNet structure"""
+    """LSTM-based policy networke"""
     
+
     def __init__(self,
-                 vocab_size: int = 20,
+                 vocab_size: int = VOCAB_SIZE,  # Was 20
                  embed_dim: int = 512,
-                 observation_size: int = 10,
+                 observation_size: int = OBSERVATION_SIZE,  # Was 10
                  hidden_size: int = 512,
-                 action_size: int = 6,
+                 action_size: int = ACTION_SIZE,  # Was 6
                  num_layers: int = 1,
                  dropout: float = 0.1,
-                 use_auxiliary: bool = False):  # Add use_auxiliary parameter
+                 use_auxiliary: bool = False):
         
         # Call parent constructor
         super().__init__(observation_size, action_size, hidden_size, use_auxiliary)

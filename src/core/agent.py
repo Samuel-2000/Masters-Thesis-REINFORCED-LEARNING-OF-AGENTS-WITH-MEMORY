@@ -1,6 +1,5 @@
-# src/core/agent.py - UPDATED VERSION
 """
-Agent class (Updated to support multiple network types)
+Agent class using consistent constants
 """
 
 import torch
@@ -16,14 +15,20 @@ from src.networks.transformer import TransformerPolicyNet
 from src.networks.multimemory import MultiMemoryPolicyNet
 from src.core.utils import safe_load
 
+# Import constants
+from src.core.constants import (
+    OBSERVATION_SIZE, ACTION_SIZE, VOCAB_SIZE,
+    ObservationTokens, Actions
+)
+
 
 class Agent:
     """Agent that interacts with environment using a policy network"""
     
     def __init__(self,
                  network_type: str = 'lstm',
-                 observation_size: int = 10,
-                 action_size: int = 6,
+                 observation_size: int = OBSERVATION_SIZE,  # Use constant (10)
+                 action_size: int = ACTION_SIZE,  # Use constant (6)
                  hidden_size: int = 512,
                  use_auxiliary: bool = False,
                  device: str = 'auto'):
@@ -34,18 +39,22 @@ class Agent:
         self.network_type = network_type
         self.use_auxiliary = use_auxiliary
         
-        # Create network based on type
+        # Validate observation tokens are in range
+        self._validate_observation_range()
+        
+        # Create network based on type with consistent sizes
         if network_type == 'lstm':
             self.network = LSTMPolicyNet(
-                vocab_size=20,  # Matches original
+                vocab_size=VOCAB_SIZE,  # Always 20 tokens
                 embed_dim=hidden_size,
-                observation_size=observation_size,
+                observation_size=observation_size,  # Always 10
                 hidden_size=hidden_size,
-                action_size=action_size
+                action_size=action_size,  # Always 6
+                use_auxiliary=use_auxiliary
             )
         elif network_type == 'transformer':
             self.network = TransformerPolicyNet(
-                vocab_size=20,
+                vocab_size=VOCAB_SIZE,
                 embed_dim=hidden_size,
                 observation_size=observation_size,
                 hidden_size=hidden_size,
@@ -57,7 +66,7 @@ class Agent:
             )
         elif network_type == 'multimemory':
             self.network = MultiMemoryPolicyNet(
-                vocab_size=20,
+                vocab_size=VOCAB_SIZE,
                 embed_dim=hidden_size,
                 observation_size=observation_size,
                 hidden_size=hidden_size,
@@ -72,11 +81,32 @@ class Agent:
         
         self.network.to(self.device)
         
+        # Debug
+        print(f"Created {network_type} agent:")
+        print(f"  Observation size: {observation_size}")
+        print(f"  Action size: {action_size}")
+        print(f"  Vocab size: {VOCAB_SIZE}")
+        print(f"  Device: {device}")
+    
+    def _validate_observation_range(self):
+        """Validate that observation tokens are within expected range"""
+        max_token = ObservationTokens.ENERGY_LEVEL_5  # Should be 19
+        if max_token != VOCAB_SIZE - 1:
+            raise ValueError(f"Observation token range mismatch: "
+                           f"max_token={max_token}, VOCAB_SIZE={VOCAB_SIZE}")
+        print(f"✓ Observation tokens valid: 0-{max_token}")
+    
     def act(self, 
             observation: np.ndarray,
             training: bool = False) -> int:
         """Select action based on observation"""
         with torch.set_grad_enabled(training):
+            # Validate observation range
+            obs_min, obs_max = observation.min(), observation.max()
+            if obs_min < 0 or obs_max >= VOCAB_SIZE:
+                raise ValueError(f"Observation out of range [0, {VOCAB_SIZE-1}]: "
+                               f"min={obs_min}, max={obs_max}")
+            
             # Convert observation to LongTensor for embedding layer
             obs_tensor = torch.from_numpy(observation).long()
             
@@ -98,6 +128,10 @@ class Agent:
                 # Take greedy action
                 action = logits.argmax(dim=-1).item()
             
+            # Validate action is within range
+            if not (0 <= action < ACTION_SIZE):
+                raise ValueError(f"Invalid action: {action}")
+            
             return action
     
     def reset(self):
@@ -117,13 +151,12 @@ class Agent:
         if hasattr(self.network, 'get_config'):
             config.update(self.network.get_config())
         else:
-            # Fallback to default values
+            # Fallback to constant values
             config.update({
-                'vocab_size': 20,
-                'embed_dim': 512,
-                'observation_size': 10,
-                'hidden_size': 512,
-                'action_size': 6
+                'vocab_size': VOCAB_SIZE,
+                'observation_size': OBSERVATION_SIZE,
+                'action_size': ACTION_SIZE,
+                'hidden_size': self.network.hidden_size if hasattr(self.network, 'hidden_size') else 512
             })
         
         torch.save({
@@ -131,30 +164,25 @@ class Agent:
             'config': config
         }, path)
     
-
     @classmethod
     def load(cls, path: str, device: str = 'auto'):
         """Load agent from file"""
         if device == 'auto':
             device = 'cuda' if torch.cuda.is_available() else 'cpu'
         
-
         checkpoint = safe_load(path, map_location=device)
-
         config = checkpoint.get('config', {})
         
         # Get network type, default to 'lstm' for backward compatibility
         network_type = config.get('network_type', 'lstm')
         
-        # Get network parameters from config
-        vocab_size = config.get('vocab_size', 20)
-        embed_dim = config.get('embed_dim', 512)
-        observation_size = config.get('observation_size', 10)
+        # Use constants for sizes (override any saved values for consistency)
+        observation_size = OBSERVATION_SIZE
+        action_size = ACTION_SIZE
         hidden_size = config.get('hidden_size', 512)
-        action_size = config.get('action_size', 6)
         use_auxiliary = config.get('use_auxiliary', False)
         
-        # Create agent
+        # Create agent with consistent sizes
         agent = cls(
             network_type=network_type,
             observation_size=observation_size,
@@ -173,13 +201,21 @@ class Agent:
             env,
             episodes: int = 10,
             visualize: bool = False,
-            save_video: bool = False) -> Dict[str, Any]:
-        """Test agent performance - FIXED VERSION with correct video saving"""
+            save_video: bool = False,
+            model_name = None) -> Dict[str, Any]:
+        """Test agent performance"""
         self.network.eval()
         
         rewards = []
         success_flags = []
         steps_list = []
+        
+        # Extract model name if not provided
+        if model_name is None:
+            if hasattr(self, 'network_type'):
+                model_name = f"{self.network_type}_model"
+            else:
+                model_name = "model"
         
         for episode in range(episodes):
             obs, info = env.reset()
@@ -192,6 +228,13 @@ class Agent:
             frames = []  # Reset frames for each episode
             
             while not (terminated or truncated) and steps < env.max_steps:
+                # Validate observation
+                if obs.min() < 0 or obs.max() >= VOCAB_SIZE:
+                    print(f"Warning: Invalid observation in episode {episode}, step {steps}: "
+                          f"min={obs.min()}, max={obs.max()}")
+                    # Clip to valid range
+                    obs = np.clip(obs, 0, VOCAB_SIZE - 1)
+                
                 # Get action
                 action = self.act(obs, training=False)
                 
@@ -219,10 +262,16 @@ class Agent:
                         # Create video writer for this specific episode
                         h, w, _ = frames[0].shape
                         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-                        video_path = f'results/videos/test_episode_{episode}.mp4'
+                        
+                        # Use model name in video filename
+                        video_path = f'results/videos/{model_name}_test_episode_{episode}.mp4'
                         
                         # Ensure directory exists
                         os.makedirs(os.path.dirname(video_path), exist_ok=True)
+                        
+                        # Check if file exists and remove it (overwrite)
+                        if os.path.exists(video_path):
+                            os.remove(video_path)
                         
                         video_writer = cv2.VideoWriter(
                             video_path, fourcc, 20.0, (w, h)

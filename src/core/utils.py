@@ -1,3 +1,5 @@
+# utils.py
+
 """
 Utility functions for Maze RL
 """
@@ -225,3 +227,20 @@ def safe_load(path: str, map_location=None, **kwargs):
             UserWarning
         )
         return torch.load(path, map_location=map_location, weights_only=False, **kwargs)
+    
+
+
+def get_model_name_from_path(model_path: str) -> str:
+    """Extract a clean model name from a file path"""
+    from pathlib import Path
+    path = Path(model_path)
+    
+    # Get the filename without extension
+    filename = path.stem
+    
+    # Remove common suffixes
+    for suffix in ['_best', '_final', '_checkpoint', '_epoch']:
+        if filename.endswith(suffix):
+            filename = filename[:-len(suffix)]
+    
+    return filename

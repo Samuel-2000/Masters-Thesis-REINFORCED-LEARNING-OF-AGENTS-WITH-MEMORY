@@ -9,6 +9,8 @@ from .base import BaseNetwork, EmbeddingLayer, AttentionAggregator
 from .lstm import LSTMPolicyNet
 from .transformer import TransformerPolicyNet
 
+from src.core.constants import VOCAB_SIZE, OBSERVATION_SIZE, ACTION_SIZE
+
 
 class NeuralCache(nn.Module):
     """Neural cache with content-based addressing and batch support"""
@@ -98,11 +100,11 @@ class MultiMemoryPolicyNet(BaseNetwork):
     """Network with multiple memory systems"""
     
     def __init__(self,
-                 vocab_size: int = 20,
+                 vocab_size: int = VOCAB_SIZE,
                  embed_dim: int = 512,
-                 observation_size: int = 10,
+                 observation_size: int = OBSERVATION_SIZE,
                  hidden_size: int = 512,
-                 action_size: int = 6,
+                 action_size: int = ACTION_SIZE,
                  transformer_heads: int = 8,
                  transformer_layers: int = 3,
                  cache_size: int = 50,

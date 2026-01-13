@@ -35,6 +35,46 @@ class Visualizer:
         
         self.env = None
         self.frames = []
+
+
+    def run(self,
+        episodes: int = 3,
+        env_config: Optional[Dict] = None,
+        save_video: bool = False,
+        save_gif: bool = False):
+        """Run visualization with custom environment config"""
+        if env_config is None:
+            env_config = {
+                'grid_size': 11,
+                'max_steps': 100,
+                'obstacle_fraction': 0.25,
+                'n_food_sources': 4,
+                'render_size': 512
+            }
+        
+        # Create environment from config
+        from src.core.environment import GridMazeWorld
+        env = GridMazeWorld(**env_config)
+        
+        # Run episode
+        episode_results = self.run_episode(
+            env_config=env_config,
+            max_steps=env_config.get('max_steps', 100),
+            render=True,
+            save_frames=save_video or save_gif
+        )
+        
+        # Save video if requested
+        if save_video and self.frames:
+            video_path = self.create_video()
+            print(f"Video saved to: {video_path}")
+        
+        # Save GIF if requested
+        if save_gif and self.frames:
+            gif_path = self.create_gif()
+            print(f"GIF saved to: {gif_path}")
+        
+        return episode_results
     
     def run_episode(self,
                    env_config: Optional[Dict] = None,

@@ -135,10 +135,11 @@ class Benchmark:
         else:
             return checkpoint_models
     
+
     def _benchmark_single(self,
-                         model_path: Path,
-                         episodes: int,
-                         env_config: Dict) -> Dict[str, Any]:
+                        model_path: Path,
+                        episodes: int,
+                        env_config: Dict) -> Dict[str, Any]:
         """Benchmark a single model"""
         # Load agent with error handling
         try:
@@ -146,7 +147,8 @@ class Benchmark:
         except Exception as e:
             raise RuntimeError(f"Failed to load agent: {e}")
         
-        # Create environment
+        # Create environment using GridMazeWorld directly
+        from src.core.environment import GridMazeWorld
         env = GridMazeWorld(**env_config)
         
         # Run episodes

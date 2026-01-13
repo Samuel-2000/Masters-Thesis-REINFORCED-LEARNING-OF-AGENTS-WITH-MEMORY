@@ -8,16 +8,20 @@ import math
 from typing import Optional, Tuple
 from .base import BaseNetwork, EmbeddingLayer, AttentionAggregator
 
+from src.core.constants import VOCAB_SIZE, OBSERVATION_SIZE, ACTION_SIZE
+
 
 class TransformerPolicyNet(BaseNetwork):
     """Transformer-based policy network"""
+
+
     
     def __init__(self,
-                 vocab_size: int = 20,
+                 vocab_size: int = VOCAB_SIZE,
                  embed_dim: int = 512,
-                 observation_size: int = 10,
+                 observation_size: int = OBSERVATION_SIZE,
                  hidden_size: int = 512,
-                 action_size: int = 6,
+                 action_size: int = ACTION_SIZE,
                  num_heads: int = 8,
                  num_layers: int = 3,
                  dropout: float = 0.1,
