@@ -8,6 +8,8 @@ import numpy as np
 from typing import Dict, Any, Optional
 from .environment import GridMazeWorld
 
+from src.core.constants import TaskClass
+
 
 class EnvironmentFactory:
     """Factory for creating maze environments with various configurations"""
@@ -15,7 +17,6 @@ class EnvironmentFactory:
     @staticmethod
     def create_from_args(args, test_mode: bool = False) -> GridMazeWorld:
         """Create environment instance from command line arguments"""
-        # Start with default config
         env_config = {
             'grid_size': 11,
             'max_steps': 100,
@@ -26,30 +27,15 @@ class EnvironmentFactory:
             'energy_decay': 0.98,
             'energy_per_step': 0.1,
             'render_size': 512 if test_mode else 0,
+            'task_class': args.task_class if hasattr(args, 'task_class') else TaskClass.BASIC,
+            'complexity_level': max(0.0, min(1.0, args.complexity_level)) if hasattr(args, 'complexity_level') else 0.0,
         }
         
-        # Add complexity parameters if provided
-        if hasattr(args, 'task_class'):
-            env_config['task_class'] = args.task_class
-        
-        if hasattr(args, 'complexity_level'):
-            # Ensure complexity is within bounds
-            complexity = max(0.0, min(1.0, args.complexity_level))
-            env_config['complexity_level'] = complexity
-        
-        if hasattr(args, 'n_doors'):
-            env_config['n_doors'] = args.n_doors
-        
-        if hasattr(args, 'n_buttons_per_door'):
-            env_config['n_buttons_per_door'] = args.n_buttons_per_door
-        
-        if hasattr(args, 'door_periodic'):
-            env_config['door_periodic'] = args.door_periodic
-        
-        if hasattr(args, 'button_break_probability'):
-            # Ensure probability is within bounds
-            prob = max(0.0, min(1.0, args.button_break_probability))
-            env_config['button_break_probability'] = prob
+        # For door parameters: pass -1/None for defaults
+        env_config['n_doors'] = -1  # Always use task class default unless explicitly overridden
+        env_config['n_buttons_per_door'] = -1
+        env_config['door_periodic'] = None
+        env_config['button_break_probability'] = -1.0
         
         return GridMazeWorld(**env_config)
     

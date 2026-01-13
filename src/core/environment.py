@@ -303,14 +303,14 @@ class GridMazeWorld(gym.Env):
                  energy_per_step: float = DEFAULT_ENERGY_PER_STEP,
                  render_size: int = 512,
                  # New parameters for extended features
-                 task_class: str = TaskClass.BASIC,
-                 complexity_level: float = 0.0,
-                 n_doors: int = 0,
-                 door_open_duration: int = 10,
-                 door_close_duration: int = 20,
-                 n_buttons_per_door: int = 1,
-                 button_break_probability: float = 0.0,
-                 door_periodic: bool = False):
+                task_class: str = TaskClass.BASIC,
+                complexity_level: float = 0.0,
+                n_doors: int = -1,  # -1 means "use task class default"
+                door_open_duration: int = 10,
+                door_close_duration: int = 20,
+                n_buttons_per_door: int = -1,  # -1 means "use task class default"
+                button_break_probability: float = -1.0,  # -1.0 means "use task class default"
+                door_periodic: bool = None):  # None means "use task class default"
         
         super().__init__()
         
@@ -323,15 +323,19 @@ class GridMazeWorld(gym.Env):
         self.energy_per_step = energy_per_step
         self.render_size = render_size
         
-        # Extended features
+        # Extended features - store DIRECTLY
         self.task_class = task_class
         self.complexity_level = max(0.0, min(1.0, complexity_level))
-        self.n_doors = n_doors
         self.door_open_duration = door_open_duration
         self.door_close_duration = door_close_duration
+
+        self.n_doors = n_doors
         self.n_buttons_per_door = n_buttons_per_door
-        self.button_break_probability = max(0.0, min(1.0, button_break_probability))
+        self.button_break_probability = button_break_probability
         self.door_periodic = door_periodic
+
+
+
         
         # Adjust parameters based on task class and complexity
         self._adjust_parameters_by_task_class()
@@ -372,33 +376,52 @@ class GridMazeWorld(gym.Env):
     def _adjust_parameters_by_task_class(self):
         """Adjust environment parameters based on task class and complexity level"""
         if self.task_class == TaskClass.BASIC:
+            # BASIC: No doors, no matter what user specified
             self.n_doors = 0
             self.n_buttons_per_door = 0
             self.button_break_probability = 0.0
             self.door_periodic = False
             
         elif self.task_class == TaskClass.DOORS:
-            if self.n_doors == 0:
+            # DOORS: Periodic doors (open/close on timer), NO buttons
+            # If user specified -1, use complexity-based value
+            if self.n_doors == -1:
                 self.n_doors = max(1, int(self.complexity_level * 3))
+            
+            # Override: DOORS class always has NO buttons
             self.n_buttons_per_door = 0
             self.button_break_probability = 0.0
+            
+            # Override: DOORS class always periodic
             self.door_periodic = True
             
         elif self.task_class == TaskClass.BUTTONS:
-            if self.n_doors == 0:
+            # BUTTONS: Button-operated doors (not periodic)
+            if self.n_doors == -1:
                 self.n_doors = max(1, int(self.complexity_level * 3))
-            if self.n_buttons_per_door == 0:
+            
+            if self.n_buttons_per_door == -1:
                 self.n_buttons_per_door = 1
-            self.button_break_probability = self.complexity_level * 0.2
+            
+            if self.button_break_probability == -1.0:
+                self.button_break_probability = self.complexity_level * 0.2
+            
+            # Override: BUTTONS class never periodic
             self.door_periodic = False
             
         elif self.task_class == TaskClass.COMPLEX:
-            if self.n_doors == 0:
+            # COMPLEX: Mixed (can have both periodic and button doors)
+            if self.n_doors == -1:
                 self.n_doors = max(2, int(self.complexity_level * 4))
-            if self.n_buttons_per_door == 0:
+            
+            if self.n_buttons_per_door == -1:
                 self.n_buttons_per_door = 2 if self.complexity_level > 0.5 else 1
-            self.button_break_probability = self.complexity_level * 0.3
-            self.door_periodic = self.complexity_level > 0.7
+            
+            if self.button_break_probability == -1.0:
+                self.button_break_probability = self.complexity_level * 0.3
+            
+            if self.door_periodic is None:
+                self.door_periodic = self.complexity_level > 0.7
             
         else:
             raise ValueError(f"Unknown task class: {self.task_class}")
@@ -423,11 +446,11 @@ class GridMazeWorld(gym.Env):
         # Initialize food sources
         self._init_food_sources()
         
+        # Initialize door open array BEFORE doors and buttons
+        self.door_open_array = np.zeros((self.grid_size, self.grid_size), dtype=np.uint8)
+        
         # Initialize doors and buttons (if any)
         self._init_doors_and_buttons()
-        
-        # Initialize door open array
-        self.door_open_array = np.zeros((self.grid_size, self.grid_size), dtype=np.uint8)
         
         # Initialize food positions cache
         self.food_positions_cache = np.zeros((self.grid_size, self.grid_size), dtype=np.int8)

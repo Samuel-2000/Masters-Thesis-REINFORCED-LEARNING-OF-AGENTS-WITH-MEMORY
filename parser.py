@@ -95,6 +95,7 @@ def parse_args():
                         help="Probability that a button breaks when pressed (0.0 to 1.0)"
                     )
     
+
     # NEW: Dynamic complexity parameters for train
     train_parser.add_argument("--dynamic-complexity",
                         action="store_true",
@@ -198,6 +199,33 @@ def parse_args():
                         help="Probability that a button breaks when pressed (0.0 to 1.0)"
                     )
     
+    test_parser.add_argument('--dynamic',
+                        action='store_true',
+                        help='Test across all task classes and complexity levels'
+                    )
+
+    test_parser.add_argument('--test-all-stages',
+                        action='store_true',
+                        help='Test all task classes with current complexity level'
+                    )
+
+    test_parser.add_argument('--complexities',
+                            nargs='+',
+                            type=float,
+                            default=[0.0, 0.25, 0.5, 0.75, 1.0],
+                            help='Complexity levels to test (space-separated)'
+                    )
+
+    test_parser.add_argument('--stages',
+                        nargs='+',
+                        choices=["basic", "doors", "buttons", "complex"],
+                        default=["basic", "doors", "buttons", "complex"],
+                        help='Task classes to test (space-separated)'
+                    )
+
+
+
+
     # Benchmark command
     bench_parser = subparsers.add_parser("benchmark", help="Benchmark models")
     bench_parser.add_argument("--models-dir", 

@@ -202,7 +202,7 @@ class Agent:
             episodes: int = 10,
             visualize: bool = False,
             save_video: bool = False,
-            model_name = None) -> Dict[str, Any]:
+            model_name: str = None) -> Dict[str, Any]:
         """Test agent performance"""
         self.network.eval()
         
@@ -216,6 +216,9 @@ class Agent:
                 model_name = f"{self.network_type}_model"
             else:
                 model_name = "model"
+        
+        # Clean model name for filename
+        clean_model_name = model_name.replace('/', '_').replace('\\', '_')
         
         for episode in range(episodes):
             obs, info = env.reset()
@@ -231,7 +234,7 @@ class Agent:
                 # Validate observation
                 if obs.min() < 0 or obs.max() >= VOCAB_SIZE:
                     print(f"Warning: Invalid observation in episode {episode}, step {steps}: "
-                          f"min={obs.min()}, max={obs.max()}")
+                        f"min={obs.min()}, max={obs.max()}")
                     # Clip to valid range
                     obs = np.clip(obs, 0, VOCAB_SIZE - 1)
                 
@@ -263,8 +266,8 @@ class Agent:
                         h, w, _ = frames[0].shape
                         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
                         
-                        # Use model name in video filename
-                        video_path = f'results/videos/{model_name}_test_episode_{episode}.mp4'
+                        # Use clean model name in video filename
+                        video_path = f'results/videos/{clean_model_name}_ep_{episode}.mp4'
                         
                         # Ensure directory exists
                         os.makedirs(os.path.dirname(video_path), exist_ok=True)

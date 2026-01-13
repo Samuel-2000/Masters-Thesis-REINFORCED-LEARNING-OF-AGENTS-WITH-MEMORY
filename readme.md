@@ -11,8 +11,35 @@ run.py train --batch-size 64 --network-type multimemory --epochs 10000
 run.py test --model .\models\multimemory_64b_0.0005lr_2025-12-10_21-02-37_best.pt --save-video
 
 
-# Test dynamic complexity in a short training run
+# train and Test dynamic complexity in a short training run
 python run.py train --network-type lstm --epochs 100 --batch-size 64 --dynamic-complexity --performance-window 20 --adjustment-interval 10 --save-dir test_dynamic
+
+
+
+
+
+
+
+# Default: basic, complexity=0.0
+python run.py test --model models/lstm_best.pt --save-video
+# Video: lstm_best_ep_0.mp4
+
+# Specific configuration
+python run.py test --model models/lstm_best.pt --task-class doors --complexity-level 0.5 --save-video
+# Video: lstm_best_doors_comp_0_50_ep_0.mp4
+
+# Dynamic test (all stages × 5 complexities)
+python run.py test --model models/lstm_best.pt --dynamic --save-video
+# Videos: lstm_best_basic_comp_0_00_ep_0.mp4, lstm_best_doors_comp_0_25_ep_0.mp4, etc.
+
+# Custom dynamic test
+python run.py test --model models/lstm_best.pt --dynamic --stages basic doors --complexities 0.0 0.5 1.0 --save-video
+
+# Test without video saving
+python run.py test --model models/lstm_best.pt --dynamic --visualize
+
+# Test with custom number of episodes
+python run.py test --model models/lstm_best.pt --dynamic --episodes 5 --save-video
 
 
 batch_train.py

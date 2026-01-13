@@ -15,6 +15,8 @@ from src.evaluation.benchmark import Benchmark
 from src.core.utils import load_config, get_model_name_from_path
 from src.core.env_factory import EnvironmentFactory
 
+from datetime import datetime
+
 
 def main():
     args = parse_args()
@@ -138,50 +140,168 @@ def main():
     elif args.command == "test":
         from src.core.agent import Agent
         
-        # Extract model name for video naming
-        model_name = get_model_name_from_path(args.model)
+        # Extract model name for video naming (without .pt)
+        base_model_name = get_model_name_from_path(args.model)
         
         # Load agent
         print(f"Loading agent from {args.model}...")
         agent = Agent.load(args.model)
         
-        # Create environment using factory
-        print(f"\nCreating environment with task class: {args.task_class}")
-        print(f"Complexity level: {args.complexity_level:.2f}")
+        # Determine what to test
+        if args.dynamic:
+            # Test all combinations: stages × complexities
+            test_configs = []
+            for stage in args.stages:
+                for complexity in args.complexities:
+                    test_configs.append({
+                        'task_class': stage,
+                        'complexity_level': complexity,
+                        'n_doors': -1,  # Means "use task class default"
+                        'n_buttons_per_door': -1,  # Means "use task class default"
+                        'door_periodic': None,  # Means "use task class default"
+                        'button_break_probability': -1.0  # Means "use task class default"
+                    })
+        elif args.test_all_stages:
+            # Test all stages with single complexity
+            test_configs = []
+            for stage in args.stages:
+                test_configs.append({
+                    'task_class': stage,
+                    'complexity_level': args.complexity_level,
+                    'n_doors': args.n_doors,
+                    'n_buttons_per_door': args.n_buttons_per_door,
+                    'door_periodic': args.door_periodic,
+                    'button_break_probability': args.button_break_probability
+                })
+        else:
+            # Single test with specified/default values (default: basic, 0.0)
+            test_configs = [{
+                'task_class': args.task_class,
+                'complexity_level': args.complexity_level,
+                'n_doors': args.n_doors,
+                'n_buttons_per_door': args.n_buttons_per_door,
+                'door_periodic': args.door_periodic,
+                'button_break_probability': args.button_break_probability
+            }]
         
-        env = EnvironmentFactory.create_from_args(args, test_mode=True)
+        # Run tests for each configuration
+        all_results = []
         
-        # Print door/button info if applicable
-        if args.task_class != 'basic':
-            print(f"Number of doors: {args.n_doors}")
-            print(f"Buttons per door: {args.n_buttons_per_door}")
-            if args.button_break_probability > 0:
-                print(f"Button break probability: {args.button_break_probability:.2f}")
-            if args.door_periodic:
-                print("Doors: Periodic (open/close automatically)")
+        for config_idx, config in enumerate(test_configs):
+            print(f"\n{'='*60}")
+            print(f"Test {config_idx+1}/{len(test_configs)}")
+            print(f"{'='*60}")
+            print(f"Task class: {config['task_class']}")
+            print(f"Complexity level: {config['complexity_level']:.2f}")
+
+            
+            # Create environment
+            env = EnvironmentFactory.create_from_config({
+                'grid_size': 11,
+                'max_steps': 100,
+                'obstacle_fraction': 0.25,
+                'n_food_sources': 4,
+                'food_energy': 10.0,
+                'initial_energy': 30.0,
+                'energy_decay': 0.98,
+                'energy_per_step': 0.1,
+                'render_size': 512 if args.visualize or args.save_video else 0,
+                'task_class': config['task_class'],
+                'complexity_level': config['complexity_level'],
+                'n_doors': config['n_doors'],
+                'n_buttons_per_door': config['n_buttons_per_door'],
+                'door_periodic': config['door_periodic'],
+                'button_break_probability': config['button_break_probability']
+            }, test_mode=True)
+
+            if config['task_class'] != 'basic':
+                print(f"Number of doors: {env.n_doors}")
+                print(f"  Doors periodic: {env.door_periodic}")
+                print(f"  Buttons per door: {env.n_buttons_per_door}")
+                if env.button_break_probability > 0:
+                    print(f"    Button break probability: {env.button_break_probability:.2f}")
+            
+            # Create model name for video naming
+            if len(test_configs) > 1:
+                # Always include stage and complexity for multiple tests
+                complexity_str = f"{config['complexity_level']:.2f}".replace('.', '_')
+                model_name = f"{base_model_name}_{config['task_class']}_comp_{complexity_str}"
             else:
-                print("Doors: Require button press")
+                # For single test, include stage and complexity only if not basic/0.0
+                if config['task_class'] != 'basic' or config['complexity_level'] != 0.0:
+                    complexity_str = f"{config['complexity_level']:.2f}".replace('.', '_')
+                    model_name = f"{base_model_name}_{config['task_class']}_comp_{complexity_str}"
+                else:
+                    model_name = base_model_name
+            
+            # Run test
+            test_results = agent.test(
+                env=env,
+                episodes=args.episodes,
+                visualize=args.visualize,
+                save_video=args.save_video,
+                model_name=model_name
+            )
+            
+            # Add configuration info to results
+            test_results['config'] = config
+            all_results.append(test_results)
+            
+            print(f"\nResults:")
+            print(f"  Average Reward: {test_results['avg_reward']:.2f}")
+            print(f"  Success Rate: {test_results['success_rate']:.1f}%")
+            print(f"  Average Steps: {test_results['avg_steps']:.1f}")
+            print(f"  Std Reward: {test_results['std_reward']:.2f}")
         
-        # Run test
-        print(f"\nTesting agent for {args.episodes} episodes...")
-        test_results = agent.test(
-            env=env,
-            episodes=args.episodes,
-            visualize=args.visualize,
-            save_video=args.save_video,
-            model_name=model_name
-        )
-        
-        print(f"\n{'='*60}")
-        print("TEST RESULTS")
-        print(f"{'='*60}")
-        print(f"Task class: {args.task_class}")
-        print(f"Complexity level: {args.complexity_level:.2f}")
-        print(f"Average Reward: {test_results['avg_reward']:.2f}")
-        print(f"Success Rate: {test_results['success_rate']:.1f}%")
-        print(f"Average Steps: {test_results['avg_steps']:.1f}")
-        print(f"Std Reward: {test_results['std_reward']:.2f}")
-        print(f"{'='*60}")
+        # Print summary if multiple tests
+        if len(all_results) > 1:
+            print(f"\n{'='*80}")
+            print("TESTING SUMMARY")
+            print(f"{'='*80}")
+            print(f"{'Task Class':<10} {'Complexity':<12} {'Avg Reward':<12} {'Success':<10} {'Avg Steps':<10}")
+            print("-" * 70)
+            
+            for result in all_results:
+                config = result['config']
+                print(f"{config['task_class']:<10} "
+                    f"{config['complexity_level']:<12.2f} "
+                    f"{result['avg_reward']:<12.2f} "
+                    f"{result['success_rate']:<10.1f}% "
+                    f"{result['avg_steps']:<10.1f}")
+            
+            # Find best configuration
+            best_result = max(all_results, key=lambda x: x['avg_reward'])
+            best_config = best_result['config']
+            print(f"\nBest configuration:")
+            print(f"  Task class: {best_config['task_class']}")
+            print(f"  Complexity: {best_config['complexity_level']:.2f}")
+            print(f"  Average Reward: {best_result['avg_reward']:.2f}")
+            print(f"  Success Rate: {best_result['success_rate']:.1f}%")
+            
+            # Save summary to file
+            summary_path = f'results/test_summary_{base_model_name}_{datetime.now().strftime("%Y%m%d_%H%M%S")}.txt'
+            with open(summary_path, 'w') as f:
+                f.write("Testing Summary\n")
+                f.write("="*50 + "\n")
+                f.write(f"Model: {base_model_name}\n")
+                f.write(f"Total tests: {len(all_results)}\n")
+                f.write(f"Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+                
+                for result in all_results:
+                    config = result['config']
+                    f.write(f"Configuration:\n")
+                    f.write(f"  Task class: {config['task_class']}\n")
+                    f.write(f"  Complexity: {config['complexity_level']:.2f}\n")
+                    if config['task_class'] != 'basic':
+                        f.write(f"  Doors: {config['n_doors']}, Buttons per door: {config['n_buttons_per_door']}\n")
+                    f.write(f"Results:\n")
+                    f.write(f"  Avg Reward: {result['avg_reward']:.2f}\n")
+                    f.write(f"  Success Rate: {result['success_rate']:.1f}%\n")
+                    f.write(f"  Avg Steps: {result['avg_steps']:.1f}\n")
+                    f.write(f"  Std Reward: {result['std_reward']:.2f}\n")
+                    f.write("-"*40 + "\n")
+            
+            print(f"\nSummary saved to: {summary_path}")
         
     elif args.command == "benchmark":
         print(f"Running benchmark on models in {args.models_dir}...")
