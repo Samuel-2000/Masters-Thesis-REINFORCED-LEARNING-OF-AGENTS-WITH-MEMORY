@@ -54,8 +54,8 @@ training:
   # NEW: Dynamic complexity adjustment
   dynamic_complexity: false  # Enable/disable dynamic complexity
   performance_window: 100  # Episodes to consider for performance
-  complexity_increase_threshold: 0.7  # Performance threshold to increase complexity
-  complexity_decrease_threshold: 0.3  # Performance threshold to decrease complexity
+  complexity_increase_threshold: 0.95  # Performance threshold to increase complexity
+  complexity_decrease_threshold: 0.7  # Performance threshold to decrease complexity
   complexity_step: 0.05  # How much to change complexity each adjustment
   min_complexity: 0.0  # Minimum complexity level
   max_complexity: 1.0  # Maximum complexity level

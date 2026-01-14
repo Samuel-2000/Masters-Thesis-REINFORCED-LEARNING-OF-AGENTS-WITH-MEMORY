@@ -201,13 +201,13 @@ DEFAULT_ENERGY_PER_STEP = 0.1
 TILE_COLORS = {
     TileType.EMPTY: (40, 40, 40),
     TileType.OBSTACLE: (100, 100, 100),
-    TileType.FOOD_SOURCE: (200, 50, 50),
+    TileType.FOOD_SOURCE: (10, 50, 10),
     TileType.FOOD: (50, 200, 50),
     TileType.AGENT: (50, 50, 200),
-    TileType.DOOR_CLOSED: (139, 69, 19),    # Brown
-    TileType.DOOR_OPEN: (160, 120, 90),     # Lighter brown
-    TileType.BUTTON: (255, 255, 0),         # Yellow
-    TileType.BUTTON_BROKEN: (128, 128, 128) # Gray
+    TileType.DOOR_CLOSED: (200, 200, 200),    # Brown
+    TileType.DOOR_OPEN: (50, 50, 50),     # Lighter brown
+    TileType.BUTTON: (0, 0, 200),         # Blue
+    TileType.BUTTON_BROKEN: (200, 0, 0) # Red
 }
 
 # ============================================================================

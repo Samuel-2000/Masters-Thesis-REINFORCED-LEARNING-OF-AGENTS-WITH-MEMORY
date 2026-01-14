@@ -32,8 +32,8 @@ class ComplexityManager:
         # Dynamic complexity settings
         self.enabled = self.training_config.get('dynamic_complexity', False)
         self.performance_window = self.training_config.get('performance_window', 100)
-        self.increase_threshold = self.training_config.get('complexity_increase_threshold', 0.7)
-        self.decrease_threshold = self.training_config.get('complexity_decrease_threshold', 0.3)
+        self.increase_threshold = self.training_config.get('complexity_increase_threshold', 0.95)
+        self.decrease_threshold = self.training_config.get('complexity_decrease_threshold', 0.7)
         self.complexity_step = self.training_config.get('complexity_step', 0.05)
         self.min_complexity = self.training_config.get('min_complexity', 0.0)
         self.max_complexity = self.training_config.get('max_complexity', 1.0)
@@ -45,18 +45,19 @@ class ComplexityManager:
         self.current_stage_idx = 0
         self.current_complexity = config['environment'].get('complexity_level', 0.0)
         self.performance_history = deque(maxlen=self.performance_window)
+        self.max_rewards_by_stage = {}
         
         # Statistics
         self.adjustments_made = 0
         self.last_adjustment_epoch = 0
         
         # Performance normalization
-        self.performance_normalization = {
-            "basic": 1.0,
-            "doors": 0.8,
-            "buttons": 0.6,
-            "complex": 0.4
-        }
+        #self.performance_normalization = {
+        #    "basic": 1.0,
+        #    "doors": 0.8,
+        #    "buttons": 0.6,
+        #    "complex": 0.4
+        #}
     
     def add_performance(self, reward: float, epoch: int):
         """Add performance metric to history"""
@@ -88,9 +89,9 @@ class ComplexityManager:
             return False
         
         return True
-    
+
+    """
     def calculate_performance_score(self) -> float:
-        """Calculate normalized performance score"""
         if not self.performance_history:
             return 0.0
         
@@ -103,6 +104,33 @@ class ComplexityManager:
         
         # Clip to 0-1 range
         return max(0.0, min(1.0, normalized_performance))
+    """
+    
+    def calculate_performance_score(self) -> float:
+        if not self.performance_history:
+            return 0.0
+        
+        avg_performance = np.mean(list(self.performance_history))
+        
+        # Track maximum reward seen for each task class
+        if self.current_stage_idx not in self.max_rewards_by_stage:
+            self.max_rewards_by_stage[self.current_stage_idx] = avg_performance
+        else:
+            self.max_rewards_by_stage[self.current_stage_idx] = max(
+                self.max_rewards_by_stage[self.current_stage_idx],
+                avg_performance
+            )
+        
+        max_reward = self.max_rewards_by_stage[self.current_stage_idx]
+        
+        # Avoid division by zero
+        if max_reward < 0.1:
+            return 0.0
+        
+        # Normalize by maximum observed reward
+        normalized = avg_performance / max_reward
+        return max(0.0, min(1.0, normalized))
+
     
     def adjust_complexity(self, epoch: int) -> Optional[Dict[str, Any]]:
         """Adjust complexity based on performance"""
@@ -710,12 +738,11 @@ class AdaptiveParallelTrainer:
                 
                 while not (terminated or truncated) and steps < test_env.max_steps:
                     action = self.agent.act(obs, training=False)
-                    obs, reward, terminated, truncated, info = test_env.step(action)
+                    obs, terminated, truncated, info = test_env.step(action)
                     
-                    episode_reward += reward
                     steps += 1
                 
-                total_reward += episode_reward
+                total_reward += test_env.energy
                 episode_lengths.append(steps)
                 
                 # Consider episode successful if agent survives to end

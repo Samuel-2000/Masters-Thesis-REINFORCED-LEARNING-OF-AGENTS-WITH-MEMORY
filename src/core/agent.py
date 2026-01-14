@@ -242,9 +242,8 @@ class Agent:
                 action = self.act(obs, training=False)
                 
                 # Take step
-                obs, reward, terminated, truncated, info = env.step(action)
+                obs, terminated, truncated, info = env.step(action)
                 
-                episode_reward += reward
                 steps += 1
                 
                 # Record frame if needed
@@ -254,6 +253,7 @@ class Agent:
                         if save_video:
                             # Convert RGB to BGR for OpenCV
                             frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+                            frame_bgr = cv2.cvtColor(frame_bgr, cv2.COLOR_RGB2BGR)
                             frames.append(frame_bgr)
                         if visualize:
                             cv2.imshow('Test', frame)
@@ -289,7 +289,7 @@ class Agent:
                         # Clear frames for next episode
                         frames = []
             
-            rewards.append(episode_reward)
+            rewards.append(env.energy)
             success_flags.append(steps == env.max_steps)
             steps_list.append(steps)
             

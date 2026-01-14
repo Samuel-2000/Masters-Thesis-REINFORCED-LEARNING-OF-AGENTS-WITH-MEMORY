@@ -750,19 +750,19 @@ class GridMazeWorld(gym.Env):
         self.done = terminated or truncated
         
         # Calculate reward
-        reward = 0.01  # Survival reward per step
-        if energy_gained > 0:
-            reward += 1.0  # Food collection reward
-        if action == Actions.BUTTON:
-            if button_pressed:
-                reward += 0.5  # Successful button press reward
-            else:
-                # Small penalty for pressing a non-working button
-                # Helps agent learn button press isn't always effective
-                reward -= 0.1
+        #reward = 0.01  # Survival reward per step
+        #if energy_gained > 0:
+        #    reward += 1.0  # Food collection reward
+        #if action == Actions.BUTTON:
+        #    if button_pressed:
+        #        reward += 0.5  # Successful button press reward
+        #    else:
+        #        # Small penalty for pressing a non-working button
+        #        # Helps agent learn button press isn't always effective
+        #        reward -= 0.1
         
-        if self.energy < 10:
-            reward -= 0.1  # Low energy penalty
+        #if self.energy < 10:
+        #    reward -= 0.1  # Low energy penalty
         
         # Update food cache if food regenerated
         if self.steps % 2 == 0:
@@ -772,7 +772,7 @@ class GridMazeWorld(gym.Env):
         obs = self._get_observation()
         
         if self.debug and self.steps % 10 == 0:
-            print(f"Step {self.steps}: action={Actions(action).name}, reward={reward:.3f}, energy={self.energy:.1f}")
+            print(f"Step {self.steps}: action={Actions(action).name}, energy={self.energy:.1f}")
             print(f"  Observation: {obs}")
         
         info = {
@@ -788,7 +788,7 @@ class GridMazeWorld(gym.Env):
             'n_buttons_working': sum(1 for b in self.buttons if not b.is_broken)
         }
         
-        return obs, reward, terminated, truncated, info
+        return obs, terminated, truncated, info
     
     def _get_observation(self) -> np.ndarray:
         """Get current observation using JIT-compiled function"""

@@ -111,9 +111,9 @@ class Visualizer:
             action = self.agent.act(obs, training=False)
             
             # Take step
-            obs, reward, terminated, truncated, info = self.env.step(action)
+            obs, terminated, truncated, info = self.env.step(action)
             
-            total_reward += reward
+            total_reward += self.env.energy
             steps += 1
             
             # Render and save frame

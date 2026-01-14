@@ -169,10 +169,9 @@ class Benchmark:
                 action = agent.act(obs, training=False)
                 obs, reward, terminated, truncated, info = env.step(action)
                 
-                episode_reward += reward
                 steps += 1
             
-            rewards.append(episode_reward)
+            rewards.append(env.energy)
             success_flags.append(not terminated and steps == env.max_steps)  # Survived full episode
             steps_list.append(steps)
             energies.append(info.get('energy', 0))
@@ -520,9 +519,8 @@ class Benchmark:
                     while not (terminated or truncated):
                         action = agent.act(obs, training=False)
                         obs, reward, terminated, truncated, info = env.step(action)
-                        episode_reward += reward
                     
-                    rewards.append(episode_reward)
+                    rewards.append(env.energy)
                 
                 # Record results
                 results.append({
