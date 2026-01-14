@@ -7,7 +7,7 @@ import cv2
 import gymnasium as gym
 from gymnasium import spaces
 from numba import njit, prange
-from typing import Tuple, Dict, Any, Optional, List
+from typing import Tuple, Dict, Any, Optional, List, Union
 from dataclasses import dataclass
 
 from .constants import (
@@ -40,19 +40,32 @@ class Door:
     close_duration: int = 20
     can_be_opened: bool = True
     requires_button: bool = True
+    is_internal_door: bool = False  # New: indicates if this door is the only exit from a room
     
-    def update(self):
-        """Update door state based on timer"""
+    def update(self, agent_pos: Optional[np.ndarray] = None):
+        """Update door state based on timer and agent position"""
+        # If agent is on the door, don't close it
+        if agent_pos is not None and len(agent_pos) >= 2:
+            agent_y, agent_x = int(agent_pos[0]), int(agent_pos[1])
+            if agent_y == self.y and agent_x == self.x:
+                if self.is_open:
+                    self.timer = 0  # Reset timer while agent is on door
+                return
+        
+        # ALL doors: if open, check if should close (both periodic AND button doors close automatically)
         if self.is_open:
             self.timer += 1
             if self.timer >= self.open_duration:
                 self.is_open = False
                 self.timer = 0
-        else:
+        # ONLY periodic doors (requires_button=False): if closed, check if should open automatically
+        elif not self.requires_button:
+            # Periodic doors open automatically when closed
             self.timer += 1
-            if not self.requires_button and self.timer >= self.close_duration:
+            if self.timer >= self.close_duration:
                 self.is_open = True
                 self.timer = 0
+        # Button-operated doors (requires_button=True): if closed, stay closed (don't open automatically)
     
     def open(self):
         """Open the door if possible"""
@@ -75,11 +88,12 @@ class Button:
     def press(self):
         """Attempt to press the button"""
         if not self.is_broken:
-            # Small chance to break when pressed
-            if np.random.random() < self.break_probability:
+            # Small chance to break when pressed (only if break_probability > 0)
+            if self.break_probability > 0 and np.random.random() < self.break_probability:
                 self.is_broken = True
-            return True
-        return False
+                return False  # Button broke, didn't work
+            return True  # Button worked
+        return False  # Button was already broken
 
 
 @njit(cache=True, parallel=True)
@@ -410,7 +424,8 @@ class GridMazeWorld(gym.Env):
             self.door_periodic = False
             
         elif self.task_class == TaskClass.COMPLEX:
-            # COMPLEX: Mixed (can have both periodic and button doors)
+            # COMPLEX: Always 50/50 split between periodic and button doors
+            # door_periodic parameter is ignored for COMPLEX task class
             if self.n_doors == -1:
                 self.n_doors = max(2, int(self.complexity_level * 4))
             
@@ -420,8 +435,9 @@ class GridMazeWorld(gym.Env):
             if self.button_break_probability == -1.0:
                 self.button_break_probability = self.complexity_level * 0.3
             
-            if self.door_periodic is None:
-                self.door_periodic = self.complexity_level > 0.7
+            # For COMPLEX task, we always do 50/50 split, so door_periodic is not used
+            # But we still need to set it for backward compatibility
+            self.door_periodic = True  # Meaning "some doors are periodic"
             
         else:
             raise ValueError(f"Unknown task class: {self.task_class}")
@@ -505,6 +521,220 @@ class GridMazeWorld(gym.Env):
             # Mark food source on grid
             self.grid[y, x] = TileType.FOOD_SOURCE
     
+    def _analyze_room_connectivity(self, door_y: int, door_x: int):
+        """
+        Analyze if a door is internal (only exit from a room).
+        Returns True if removing this door would create two disconnected regions.
+        """
+        # Temporarily mark door as obstacle to test connectivity
+        original_tile = self.grid[door_y, door_x]
+        self.grid[door_y, door_x] = TileType.OBSTACLE
+        
+        # Find empty cells on each side of the door
+        side1_cells = []
+        side2_cells = []
+        
+        # Check north/south sides
+        if door_y > 0 and self.grid[door_y-1, door_x] in [TileType.EMPTY, TileType.FOOD, TileType.FOOD_SOURCE]:
+            side1_cells.append((door_y-1, door_x))
+        if door_y < self.grid_size-1 and self.grid[door_y+1, door_x] in [TileType.EMPTY, TileType.FOOD, TileType.FOOD_SOURCE]:
+            side2_cells.append((door_y+1, door_x))
+        
+        # Check east/west sides
+        if door_x > 0 and self.grid[door_y, door_x-1] in [TileType.EMPTY, TileType.FOOD, TileType.FOOD_SOURCE]:
+            side1_cells.append((door_y, door_x-1))
+        if door_x < self.grid_size-1 and self.grid[door_y, door_x+1] in [TileType.EMPTY, TileType.FOOD, TileType.FOOD_SOURCE]:
+            side2_cells.append((door_y, door_x+1))
+        
+        # If we have cells on both sides, check if they're connected without the door
+        if side1_cells and side2_cells:
+            start = side1_cells[0]
+            # BFS from start, not allowed through the door
+            visited = np.zeros((self.grid_size, self.grid_size), dtype=bool)
+            queue = [start]
+            visited[start[0], start[1]] = True
+            
+            while queue:
+                y, x = queue.pop(0)
+                
+                for dy, dx in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                    ny, nx = y + dy, x + dx
+                    
+                    if (0 <= ny < self.grid_size and 0 <= nx < self.grid_size and
+                        not visited[ny, nx] and
+                        self.grid[ny, nx] != TileType.OBSTACLE and
+                        not (ny == door_y and nx == door_x)):
+                        
+                        visited[ny, nx] = True
+                        queue.append((ny, nx))
+            
+            # Check if any cell from side2 is reachable
+            reachable = any(visited[y, x] for y, x in side2_cells)
+            is_internal = not reachable
+        
+        else:
+            is_internal = False
+        
+        # Restore original tile
+        self.grid[door_y, door_x] = original_tile
+        
+        return is_internal
+    
+    def _is_button_position_valid(self, button_y: int, button_x: int, door: Door) -> bool:
+        """
+        Check if a button position is valid (accessible from its side of the door)
+        """
+        # Basic validation
+        if not (0 <= button_y < self.grid_size and 0 <= button_x < self.grid_size):
+            return False
+        
+        # Cell must be empty
+        if self.grid[button_y, button_x] != TileType.EMPTY:
+            return False
+        
+        # Check if there's a clear path to the door (ignoring the door itself)
+        # We use BFS with the constraint that we can't go through the door
+        visited = np.zeros((self.grid_size, self.grid_size), dtype=bool)
+        queue = [(button_y, button_x)]
+        visited[button_y, button_x] = True
+        
+        while queue:
+            y, x = queue.pop(0)
+            
+            # Check if we've reached the door's neighborhood
+            if abs(y - door.y) + abs(x - door.x) == 1:
+                # We're adjacent to the door - check if we can actually reach it
+                # without going through obstacles
+                return True
+            
+            for dy, dx in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                ny, nx = y + dy, x + dx
+                
+                # Skip out of bounds
+                if not (0 <= ny < self.grid_size and 0 <= nx < self.grid_size):
+                    continue
+                
+                # Skip visited cells
+                if visited[ny, nx]:
+                    continue
+                
+                # Skip obstacles and other doors
+                if self.grid[ny, nx] in [TileType.OBSTACLE, TileType.DOOR_CLOSED, TileType.DOOR_OPEN]:
+                    continue
+                
+                # Skip the door cell itself (can't go through closed doors)
+                if ny == door.y and nx == door.x and not door.is_open:
+                    continue
+                
+                visited[ny, nx] = True
+                queue.append((ny, nx))
+        
+        return False
+    
+    def _create_button_at(self, y: int, x: int, door_idx: int):
+        """Create a button at the specified position"""
+        button = Button(
+            y=y, x=x,
+            door_idx=door_idx,
+            break_probability=self.button_break_probability,
+            is_broken=False
+        )
+        
+        self.buttons.append(button)
+        self.grid[y, x] = TileType.BUTTON
+    
+    def _place_buttons_for_door(self, door: Door, door_idx: int):
+        """Place buttons for a door (max 2 buttons)"""
+        y, x = door.y, door.x
+        
+        # Determine number of buttons for this door
+        n_buttons_to_place = self.n_buttons_per_door
+        
+        # If this is an internal door (only exit), we need at least 1 button, max 2
+        if door.is_internal_door:
+            n_buttons_to_place = min(2, max(1, n_buttons_to_place))
+        
+        # Find empty cells adjacent to the door (max 4 positions: N, S, E, W)
+        adjacent_cells = []
+        for dy, dx in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+            ny, nx = y + dy, x + dx
+            if 0 <= ny < self.grid_size and 0 <= nx < self.grid_size:
+                if self.grid[ny, nx] == TileType.EMPTY:
+                    # Check connectivity - button should be accessible from its side
+                    if self._is_button_position_valid(ny, nx, door):
+                        adjacent_cells.append((ny, nx, dy, dx))
+        
+        # If we need 2 buttons but only have adjacent cells on one side,
+        # we need to ensure the button is accessible from both sides
+        if n_buttons_to_place == 2 and len(adjacent_cells) < 2:
+            # For internal doors, we MUST have buttons on both sides
+            # If we can't place 2 buttons, mark door as problematic
+            if door.is_internal_door:
+                # We'll try to find alternative positions further away
+                for distance in range(2, 4):  # Try up to 3 cells away
+                    for dy in range(-distance, distance + 1):
+                        for dx in range(-distance, distance + 1):
+                            if abs(dy) + abs(dx) == distance:  # Manhattan distance
+                                ny, nx = y + dy, x + dx
+                                if 0 <= ny < self.grid_size and 0 <= nx < self.grid_size:
+                                    if self.grid[ny, nx] == TileType.EMPTY:
+                                        if self._is_button_position_valid(ny, nx, door):
+                                            adjacent_cells.append((ny, nx, dy, dx))
+                                            if len(adjacent_cells) >= 2:
+                                                break
+                        if len(adjacent_cells) >= 2:
+                            break
+                    if len(adjacent_cells) >= 2:
+                        break
+        
+        # Place buttons
+        placed_buttons = 0
+        
+        # First, try to place one button on each side if we need 2
+        if n_buttons_to_place == 2:
+            # Group cells by side (based on direction from door)
+            sides = {'north': [], 'south': [], 'east': [], 'west': []}
+            for ny, nx, dy, dx in adjacent_cells:
+                if dy == -1:
+                    sides['north'].append((ny, nx))
+                elif dy == 1:
+                    sides['south'].append((ny, nx))
+                elif dx == -1:
+                    sides['west'].append((ny, nx))
+                elif dx == 1:
+                    sides['east'].append((ny, nx))
+            
+            # Try to pick one button from opposite sides if possible
+            opposite_pairs = [('north', 'south'), ('east', 'west')]
+            for side1, side2 in opposite_pairs:
+                if sides[side1] and sides[side2]:
+                    # Place one button from each side
+                    for side in [side1, side2]:
+                        ny, nx = sides[side][0]
+                        self._create_button_at(ny, nx, door_idx)
+                        placed_buttons += 1
+                        # Remove this position from further consideration
+                        sides[side] = sides[side][1:]
+                    break
+            
+            # If we couldn't place on opposite sides, just place available buttons
+            if placed_buttons < 2:
+                for side in ['north', 'south', 'east', 'west']:
+                    for ny, nx in sides[side]:
+                        if placed_buttons >= 2:
+                            break
+                        self._create_button_at(ny, nx, door_idx)
+                        placed_buttons += 1
+        
+        else:  # Place 0 or 1 button
+            if n_buttons_to_place == 1 and adjacent_cells:
+                # Place one button in any available adjacent cell
+                ny, nx, _, _ = adjacent_cells[0]
+                self._create_button_at(ny, nx, door_idx)
+                placed_buttons += 1
+        
+        return placed_buttons
+    
     def _init_doors_and_buttons(self):
         """Initialize doors and buttons based on configuration"""
         self.doors = []
@@ -534,20 +764,45 @@ class GridMazeWorld(gym.Env):
         candidate_cells.sort(key=lambda x: x[2], reverse=True)
         
         # Place doors
-        for i in range(min(self.n_doors, len(candidate_cells))):
-            y, x, _ = candidate_cells[i]
+        placed_doors = 0
+        for y, x, _ in candidate_cells:
+            if placed_doors >= self.n_doors:
+                break
+            
+            # Check if this would be an internal door
+            is_internal = self._analyze_room_connectivity(y, x)
+            
+            # Determine if this specific door requires buttons
+            # Default: doors require buttons if n_buttons_per_door > 0
+            requires_button = self.n_buttons_per_door > 0
+            
+            # Handle different task classes
+            if self.task_class == TaskClass.COMPLEX:
+                # COMPLEX task: Always 50/50 split between periodic and button doors
+                # Ignore door_periodic parameter, do 50% periodic, 50% button
+                if np.random.random() < 0.5:
+                    requires_button = False
+            elif self.task_class == TaskClass.DOORS:
+                # DOORS task: All doors are periodic (no buttons)
+                requires_button = False
+            elif self.task_class == TaskClass.BUTTONS:
+                # BUTTONS task: All doors are button-operated
+                requires_button = True
+            # BASIC task doesn't have doors (n_doors=0)
             
             # Create door
             door = Door(
                 y=y, x=x,
                 open_duration=self.door_open_duration,
                 close_duration=self.door_close_duration,
-                requires_button=self.n_buttons_per_door > 0,
-                can_be_opened=True
+                requires_button=requires_button,
+                can_be_opened=True,
+                is_internal_door=is_internal
             )
             
-            if self.door_periodic:
-                door.requires_button = False
+            # Set initial state for periodic doors (doors that don't require buttons)
+            if not requires_button:
+                # Periodic doors start randomly open or closed
                 door.is_open = np.random.random() < 0.5
             
             self.doors.append(door)
@@ -556,53 +811,24 @@ class GridMazeWorld(gym.Env):
             # Update door open array
             self.door_open_array[y, x] = 1 if door.is_open else 0
             
-            # Place buttons for this door if needed
-            if self.n_buttons_per_door > 0:
-                self._place_buttons_for_door(door, i)
-    
-    def _place_buttons_for_door(self, door: Door, door_idx: int):
-        """Place buttons near a door"""
-        y, x = door.y, door.x
-        
-        # Find empty cells adjacent to the door
-        adjacent_cells = []
-        for dy, dx in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
-            ny, nx = y + dy, x + dx
-            if 0 <= ny < self.grid_size and 0 <= nx < self.grid_size:
-                if self.grid[ny, nx] == TileType.EMPTY:
-                    adjacent_cells.append((ny, nx))
-        
-        # Place buttons
-        n_buttons_to_place = min(self.n_buttons_per_door, len(adjacent_cells))
-        
-        if n_buttons_to_place == 0:
-            return
-        
-        # Randomly select cells for buttons
-        button_cells = np.random.choice(
-            len(adjacent_cells), 
-            size=n_buttons_to_place, 
-            replace=False
-        )
-        
-        for cell_idx in button_cells:
-            by, bx = adjacent_cells[cell_idx]
+            # Place buttons for this door if needed (only for button-operated doors)
+            if requires_button:
+                n_placed = self._place_buttons_for_door(door, placed_doors)
+                
+                # If this is an internal door and we couldn't place at least 1 button,
+                # remove the door and try another position
+                if is_internal and n_placed < 1:
+                    # Remove any buttons we placed
+                    buttons_to_remove = [b for b in self.buttons if b.door_idx == placed_doors]
+                    for button in buttons_to_remove:
+                        self.buttons.remove(button)
+                        self.grid[button.y, button.x] = TileType.EMPTY
+                    
+                    self.doors.pop()
+                    self.grid[y, x] = TileType.EMPTY
+                    continue
             
-            # Create button
-            button = Button(
-                y=by, x=bx,
-                door_idx=door_idx,
-                break_probability=self.button_break_probability,
-                is_broken=np.random.random() < self.button_break_probability
-            )
-            
-            self.buttons.append(button)
-            
-            # Mark button on grid
-            if button.is_broken:
-                self.grid[by, bx] = TileType.BUTTON_BROKEN
-            else:
-                self.grid[by, bx] = TileType.BUTTON
+            placed_doors += 1
     
     def _update_food_cache(self):
         """Update the food positions cache"""
@@ -613,9 +839,9 @@ class GridMazeWorld(gym.Env):
                 self.food_positions_cache[y, x] = 1
     
     def _update_door_states(self):
-        """Update all door states and door_open_array"""
+        """Update all door states with agent position check"""
         for door in self.doors:
-            door.update()
+            door.update(self.agent_pos)
             
             # Update grid representation
             if door.is_open:
@@ -629,24 +855,32 @@ class GridMazeWorld(gym.Env):
         """Check if button at position (button_y, button_x) can be pressed"""
         for button in self.buttons:
             if button.y == button_y and button.x == button_x:
-                # Agent can try to press ANY button (working or broken)
-                # But only working buttons actually do something
-                if button.press():  # This updates broken state if needed
-                    # If button is broken, pressing does nothing
-                    if button.is_broken:
-                        # Visual feedback: broken buttons stay the same
-                        self.grid[button_y, button_x] = TileType.BUTTON_BROKEN
-                        return False  # Button press failed
-                    
-                    # Working button: try to open the associated door
-                    if 0 <= button.door_idx < len(self.doors):
-                        door = self.doors[button.door_idx]
-                        if door.open():
-                            self.door_open_array[door.y, door.x] = 1
-                            return True
-                else:
-                    # Button was already broken
+                # Don't allow pressing broken buttons
+                if button.is_broken:
                     return False
+                
+                # Check if button is working
+                success = button.press()
+                
+                # Update visual state
+                if button.is_broken:
+                    self.grid[button_y, button_x] = TileType.BUTTON_BROKEN
+                    # If all buttons for this door are broken, mark door as unopenable
+                    door = self.doors[button.door_idx]
+                    other_buttons_working = any(
+                        b for b in self.buttons 
+                        if b.door_idx == button.door_idx and not b.is_broken
+                    )
+                    if not other_buttons_working:
+                        door.can_be_opened = False
+                    return False
+                
+                # Button worked, try to open the associated door
+                if success and 0 <= button.door_idx < len(self.doors):
+                    door = self.doors[button.door_idx]
+                    if door.open():
+                        self.door_open_array[door.y, door.x] = 1
+                        return True
                 break
         return False
     

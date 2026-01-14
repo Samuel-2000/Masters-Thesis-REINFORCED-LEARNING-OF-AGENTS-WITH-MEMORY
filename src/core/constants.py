@@ -192,7 +192,7 @@ DEFAULT_FOOD_SOURCES = 4
 DEFAULT_FOOD_ENERGY = 10.0
 DEFAULT_INITIAL_ENERGY = 30.0
 DEFAULT_ENERGY_DECAY = 0.98
-DEFAULT_ENERGY_PER_STEP = 0.1
+DEFAULT_ENERGY_PER_STEP = 1
 
 # ============================================================================
 # COLOR CONSTANTS (for rendering)
