@@ -65,16 +65,16 @@ class VectorizedMazeEnv:
         
         for i, (env, action) in enumerate(zip(self.envs, actions)):
             if not self.dones[i]:
-                obs, reward, done, truncated, info = env.step(action)
+                obs, reward, terminated, truncated, info = env.step(action)
                 
                 self.observations[i] = obs
                 self._reward_buffer[i] = reward
-                self._done_buffer[i] = done
+                self._done_buffer[i] = terminated
                 self._trunc_buffer[i] = truncated
                 infos.append(info)
                 self.steps[i] += 1
                 
-                if done or truncated:
+                if terminated or truncated:
                     self.dones[i] = True
             else:
                 # Already done, keep last observation

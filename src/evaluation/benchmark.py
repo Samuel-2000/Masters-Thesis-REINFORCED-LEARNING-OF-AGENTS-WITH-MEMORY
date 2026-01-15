@@ -169,9 +169,10 @@ class Benchmark:
                 action = agent.act(obs, training=False)
                 obs, reward, terminated, truncated, info = env.step(action)
                 
+                episode_reward += reward
                 steps += 1
             
-            rewards.append(env.energy)
+            rewards.append(episode_reward)  # Use cumulative reward
             success_flags.append(not terminated and steps == env.max_steps)  # Survived full episode
             steps_list.append(steps)
             energies.append(info.get('energy', 0))

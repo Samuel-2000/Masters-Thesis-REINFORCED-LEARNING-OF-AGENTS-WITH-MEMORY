@@ -224,7 +224,7 @@ class Agent:
             obs, info = env.reset()
             self.reset()
             
-            episode_reward = 0
+            episode_reward = 0  # Track cumulative reward
             steps = 0
             terminated = truncated = False
             
@@ -242,8 +242,9 @@ class Agent:
                 action = self.act(obs, training=False)
                 
                 # Take step
-                obs, terminated, truncated, info = env.step(action)
+                obs, reward, terminated, truncated, info = env.step(action)  # Updated to get reward
                 
+                episode_reward += reward  # Sum rewards
                 steps += 1
                 
                 # Record frame if needed
@@ -289,7 +290,7 @@ class Agent:
                         # Clear frames for next episode
                         frames = []
             
-            rewards.append(env.energy)
+            rewards.append(episode_reward)  # Use cumulative reward
             success_flags.append(steps == env.max_steps)
             steps_list.append(steps)
             

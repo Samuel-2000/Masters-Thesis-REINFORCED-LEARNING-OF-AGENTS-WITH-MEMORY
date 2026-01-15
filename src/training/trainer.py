@@ -738,11 +738,12 @@ class AdaptiveParallelTrainer:
                 
                 while not (terminated or truncated) and steps < test_env.max_steps:
                     action = self.agent.act(obs, training=False)
-                    obs, terminated, truncated, info = test_env.step(action)
+                    obs, reward, terminated, truncated, info = test_env.step(action)
                     
+                    episode_reward += reward
                     steps += 1
                 
-                total_reward += test_env.energy
+                total_reward += episode_reward  # Use cumulative reward
                 episode_lengths.append(steps)
                 
                 # Consider episode successful if agent survives to end
