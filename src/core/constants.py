@@ -66,6 +66,9 @@ class Actions(IntEnum):
     DOWN = 3
     STAY = 4
     BUTTON = 5  # Explicit button push action
+
+    def __str__(self):
+        return self.name
     
 # Environment internal action (not available to agent)
 ENV_ACTIONS_START = 6

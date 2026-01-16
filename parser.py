@@ -147,8 +147,9 @@ def parse_args():
     test_parser = subparsers.add_parser("test", help="Test a trained model")
     test_parser.add_argument("--model", 
                         type=str, 
-                        required=True, 
-                        help="Path to trained model"
+                        # Make required=False and we'll check manually
+                        required=False, 
+                        help="Path to trained model (not needed for --play mode)"
                     )
     test_parser.add_argument("--episodes", 
                         type=int, 
@@ -223,7 +224,10 @@ def parse_args():
                         help='Task classes to test (space-separated)'
                     )
 
-
+    test_parser.add_argument("--play",
+                        action="store_true",
+                        help="Human play mode - control agent with keyboard instead of using a model"
+                    )
 
 
     # Benchmark command
