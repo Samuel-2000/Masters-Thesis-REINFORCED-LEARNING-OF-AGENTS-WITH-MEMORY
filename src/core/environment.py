@@ -273,7 +273,7 @@ class GridMazeWorld(gym.Env):
         self.doors: List[Door] = []
         self.buttons: List[Button] = []
         self.colors = TILE_COLORS
-        self.debug = False
+        self.debug = False  # Set to False for normal use
         # Prepare template set once
         self._init_templates()
 
@@ -293,7 +293,7 @@ class GridMazeWorld(gym.Env):
             if self.n_doors == -1:
                 self.n_doors = max(1, int(self.complexity_level * 3))
             if self.n_buttons_per_door == -1:
-                self.n_buttons_per_door = 1
+                self.n_buttons_per_door = 4  # Allow up to 4 buttons
             if self.button_break_probability == -1.0:
                 self.button_break_probability = self.complexity_level * 0.2
             self.door_periodic = False
@@ -301,7 +301,7 @@ class GridMazeWorld(gym.Env):
             if self.n_doors == -1:
                 self.n_doors = max(2, int(self.complexity_level * 4))
             if self.n_buttons_per_door == -1:
-                self.n_buttons_per_door = 2 if self.complexity_level > 0.5 else 1
+                self.n_buttons_per_door = 4  # Allow up to 4 buttons
             if self.button_break_probability == -1.0:
                 self.button_break_probability = self.complexity_level * 0.3
             self.door_periodic = True
@@ -377,8 +377,6 @@ class GridMazeWorld(gym.Env):
             [-1, -1, -1]
             ], dtype=np.int8)
 
-
-
         base_templates = [T_vert, T_horiz, T_diag1, T_diag2, T_a, T_b, T_c, T_d, T_e, T_f, T_g, T_h]
         self.templates = []
         for idx, base in enumerate(base_templates):
@@ -414,7 +412,7 @@ class GridMazeWorld(gym.Env):
         return True
 
     # ------------------ Helper utilities ---------------------------------
-    def _get_temp_grid_with_auto_doors_open(self) -> np.ndarray:
+    def _get_temp_grid_with_periodic_doors_open(self) -> np.ndarray:
         temp = self.grid.copy()
         for d in self.doors:
             if not d.requires_button:
@@ -424,262 +422,313 @@ class GridMazeWorld(gym.Env):
     def _is_passable(self, tile_type: int) -> bool:
         return tile_type in [TileType.EMPTY, TileType.FOOD, TileType.FOOD_SOURCE, TileType.BUTTON, TileType.BUTTON_BROKEN, TileType.DOOR_OPEN]
 
-    def _manhattan(self, a_y: int, a_x: int, b_y: int, b_x: int) -> int:
+    def _manhattan_distance(self, a_y: int, a_x: int, b_y: int, b_x: int) -> int:
         return abs(a_y - b_y) + abs(a_x - b_x)
 
-    def _is_reachable_within_steps(self, start_y: int, start_x: int, target_y: int, target_x: int, max_steps: int, grid_override: Optional[np.ndarray] = None) -> bool:
-        if max_steps < 0:
-            return False
-        grid_to_use = grid_override if grid_override is not None else self.grid
-        h, w = grid_to_use.shape
-        if self._manhattan(start_y, start_x, target_y, target_x) > max_steps:
-            return False
-        visited = np.zeros((h, w), dtype=bool)
-        dq = deque()
-        dq.append((start_y, start_x, 0))
-        visited[start_y, start_x] = True
-        while dq:
-            cy, cx, dist = dq.popleft()
-            if cy == target_y and cx == target_x:
-                return True
-            if dist >= max_steps:
-                continue
-            for dy, dx in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
-                ny, nx = cy + dy, cx + dx
-                if not (0 <= ny < h and 0 <= nx < w):
-                    continue
-                if visited[ny, nx]:
-                    continue
-                tile = grid_to_use[ny, nx]
-                if tile in [TileType.EMPTY, TileType.FOOD, TileType.FOOD_SOURCE, TileType.DOOR_OPEN, TileType.BUTTON, TileType.BUTTON_BROKEN]:
-                    visited[ny, nx] = True
-                    dq.append((ny, nx, dist + 1))
-        return False
-
-    def _flood_fill_4way_components_with_door_closed(self, door_y: int, door_x: int) -> List[List[Tuple[int, int]]]:
-        temp = self._get_temp_grid_with_auto_doors_open()
-        temp[door_y, door_x] = TileType.OBSTACLE
+    def _find_regions_separated_by_door(self, door_y: int, door_x: int, grid_to_use: np.ndarray) -> List[List[Tuple[int, int]]]:
+        """Find all regions (connected components) that would be separated if this door were closed.
+        Uses the provided grid which may already have other doors as obstacles."""
+        temp_grid = grid_to_use.copy()
+        temp_grid[door_y, door_x] = TileType.OBSTACLE
         grid_h, grid_w = self.grid_size, self.grid_size
         visited = np.zeros((grid_h, grid_w), dtype=bool)
         directions = [(-1, 0), (1, 0), (0, -1), (0, 1)]
-        components = []
+        regions = []
         for y in range(grid_h):
             for x in range(grid_w):
-                if visited[y, x] or temp[y, x] == TileType.OBSTACLE:
+                if visited[y, x] or temp_grid[y, x] == TileType.OBSTACLE:
                     continue
-                if temp[y, x] not in [TileType.EMPTY, TileType.FOOD, TileType.FOOD_SOURCE, TileType.DOOR_OPEN, TileType.BUTTON, TileType.BUTTON_BROKEN]:
+                if temp_grid[y, x] not in [TileType.EMPTY, TileType.FOOD, TileType.FOOD_SOURCE, TileType.DOOR_OPEN, TileType.BUTTON, TileType.BUTTON_BROKEN]:
                     continue
-                component = []
+                region = []
                 stack = [(y, x)]
                 visited[y, x] = True
                 while stack:
                     cy, cx = stack.pop()
-                    component.append((cy, cx))
+                    region.append((cy, cx))
                     for dy, dx in directions:
                         ny, nx = cy + dy, cx + dx
                         if not (0 <= ny < grid_h and 0 <= nx < grid_w):
                             continue
-                        if visited[ny, nx] or temp[ny, nx] == TileType.OBSTACLE:
+                        if visited[ny, nx] or temp_grid[ny, nx] == TileType.OBSTACLE:
                             continue
-                        if temp[ny, nx] in [TileType.EMPTY, TileType.FOOD, TileType.FOOD_SOURCE, TileType.DOOR_OPEN, TileType.BUTTON, TileType.BUTTON_BROKEN]:
+                        if temp_grid[ny, nx] in [TileType.EMPTY, TileType.FOOD, TileType.FOOD_SOURCE, TileType.DOOR_OPEN, TileType.BUTTON, TileType.BUTTON_BROKEN]:
                             visited[ny, nx] = True
                             stack.append((ny, nx))
-                if component:
-                    components.append(component)
-        return components
+                if region:
+                    regions.append(region)
+        return regions
 
-    # ---------------- Candidate scanning using templates ------------------
-    def _candidate_cells_using_templates(self) -> List[Tuple[int, int]]:
+    def _bfs_distance(self, start_y: int, start_x: int, target_y: int, target_x: int, 
+                    grid_override: Optional[np.ndarray] = None) -> int:
+        """Calculate actual shortest path distance using BFS"""
+        grid = grid_override if grid_override is not None else self.grid
+        h, w = grid.shape
+        
+        if start_y == target_y and start_x == target_x:
+            return 0
+        
+        visited = np.zeros((h, w), dtype=bool)
+        queue = deque()
+        queue.append((start_y, start_x, 0))
+        visited[start_y, start_x] = True
+        
+        directions = [(-1, 0), (1, 0), (0, -1), (0, 1)]
+        
+        while queue:
+            y, x, dist = queue.popleft()
+            
+            for dy, dx in directions:
+                ny, nx = y + dy, x + dx
+                
+                if not (0 <= ny < h and 0 <= nx < w):
+                    continue
+                    
+                if visited[ny, nx]:
+                    continue
+                    
+                # Check if cell is passable
+                tile = grid[ny, nx]
+                if not self._is_passable(tile):
+                    continue
+                    
+                if ny == target_y and nx == target_x:
+                    return dist + 1
+                    
+                visited[ny, nx] = True
+                queue.append((ny, nx, dist + 1))
+        
+        return float('inf')  # Unreachable
+
+    # ---------------- Door candidate scanning using templates ------------------
+    def _find_door_candidates_with_templates(self, grid_to_use: np.ndarray) -> List[Tuple[int, int]]:
+        """Find potential door positions using template matching on the provided grid."""
         candidates = []
-        temp_grid = self._get_temp_grid_with_auto_doors_open()
+        # For template matching, we treat existing doors as obstacles
+        temp_grid = grid_to_use.copy()
         H, W = self.grid_size, self.grid_size
+        
         for y in range(1, H - 1):
             for x in range(1, W - 1):
-                if self.grid[y, x] != TileType.EMPTY:
+                if grid_to_use[y, x] != TileType.EMPTY:
                     continue
-                near_door = False
+                
+                # Skip positions too close to existing doors
+                near_existing_door = False
                 for dy in (-1, 0, 1):
                     for dx in (-1, 0, 1):
                         if dy == 0 and dx == 0:
                             continue
                         ny, nx = y + dy, x + dx
-                        if temp_grid[ny, nx] in (TileType.DOOR_OPEN, TileType.DOOR_CLOSED):
-                            near_door = True
+                        if grid_to_use[ny, nx] in (TileType.DOOR_OPEN, TileType.DOOR_CLOSED):
+                            near_existing_door = True
                             break
-                    if near_door:
+                    if near_existing_door:
                         break
-                if near_door:
+                if near_existing_door:
                     continue
-                matched = False
+                
+                # Check if this position matches any template
+                matches_template = False
                 for tpl, _name in self.templates:
                     if self._matches_template(y, x, tpl, grid_override=temp_grid):
-                        matched = True
+                        matches_template = True
                         break
-                if matched:
+                
+                if matches_template:
                     candidates.append((y, x))
+        
         return candidates
 
-    # ---------------- Place buttons for isolated components ----------------
-    def _place_buttons_for_isolated_components(self, door: Door, door_idx: int, components: List[List[Tuple[int, int]]]) -> bool:
-        buttons_required = len(components)
-        max_allowed_steps = max(0, door.close_duration - 1)
-        temp_grid = self._get_temp_grid_with_auto_doors_open()
-        eligibles_per_component: List[List[Tuple[int, int]]] = []
-        for comp in components:
-            empties = [(cy, cx) for cy, cx in comp if self.grid[cy, cx] == TileType.EMPTY]
-            elig = []
-            for by, bx in empties:
-                if self._is_reachable_within_steps(door.y, door.x, by, bx, max_allowed_steps, grid_override=temp_grid):
-                    elig.append((by, bx))
-            eligibles_per_component.append(elig)
-        for elig in eligibles_per_component:
-            if not elig:
+    # ---------------- Door and button placement logic --------------------------
+    def _can_place_door_with_buttons(self, y: int, x: int, grid_to_use: np.ndarray) -> Tuple[bool, List[Tuple[int, int]]]:
+        """Check if a door can be placed at (y, x) with proper button placement.
+        Uses the provided grid for evaluation (grid may have other doors as obstacles).
+        Returns (success, button_positions)"""
+        
+        # Check that position is empty in the provided grid
+        if grid_to_use[y, x] != TileType.EMPTY:
+            if self.debug:
+                print(f"  Door candidate ({y},{x}): grid cell is not empty")
+            return False, []
+        
+        # Find regions separated by this door on the current grid (with existing doors as obstacles)
+        regions = self._find_regions_separated_by_door(y, x, grid_to_use)
+        
+        if self.debug:
+            print(f"  Door candidate ({y},{x}): found {len(regions)} regions")
+            for i, region in enumerate(regions):
+                print(f"    Region {i}: {len(region)} cells, sample: {region[:3]}")
+        
+        # We need exactly one button per region (1-4 buttons)
+        required_buttons = len(regions)
+        
+        # Check if we have enough button allowance
+        if self.n_buttons_per_door > 0 and required_buttons > self.n_buttons_per_door:
+            if self.debug:
+                print(f"  Door candidate ({y},{x}): requires {required_buttons} buttons but n_buttons_per_door={self.n_buttons_per_door}")
+            return False, []
+        
+        # Check if we can place a button in EACH region
+        button_positions = []
+        
+        for i, region in enumerate(regions):
+            # Find ALL suitable positions in this region (must be EMPTY in the current grid)
+            candidate_positions = []
+            for ry, rx in region:
+                if grid_to_use[ry, rx] == TileType.EMPTY:
+                    # Calculate distance on the current grid (with other doors as obstacles)
+                    distance = self._bfs_distance(y, x, ry, rx, grid_to_use)
+                    if distance <= self.door_open_duration -2:
+                        candidate_positions.append((ry, rx, distance))
+            
+            if not candidate_positions:
                 if self.debug:
-                    print(f"Door at ({door.y},{door.x}) skipped: component has no eligible button positions within {max_allowed_steps} steps")
-                return False
-        placed_positions = []
-        for elig in eligibles_per_component:
-            by, bx = elig[np.random.randint(0, len(elig))]
-            btn = Button(y=by, x=bx, door_idx=door_idx, break_probability=self.button_break_probability, is_broken=False)
-            self.buttons.append(btn)
-            self.grid[by, bx] = TileType.BUTTON
-            placed_positions.append((by, bx))
-        return True
+                    print(f"  Door candidate ({y},{x}): region {i} (size {len(region)}) has no empty cell within {self.door_open_duration} steps")
+                return False, []
+            
+            # Choose RANDOM position from candidates (not the closest)
+            if len(candidate_positions) > 0:
+                # Random selection
+                idx = np.random.randint(0, len(candidate_positions))
+                by, bx, dist = candidate_positions[idx]
+                if self.debug:
+                    print(f"  Door candidate ({y},{x}): region {i} -> RANDOM button at ({by},{bx}), distance {dist}")
+                button_positions.append((by, bx))
+            else:
+                return False, []
+        
+        if self.debug:
+            print(f"  Door candidate ({y},{x}): SUCCESS, button positions = {button_positions}")
+        return True, button_positions
 
     # ---------------- Main initialization of doors & buttons ----------------
-    def _init_doors_and_buttons_meaningful(self):
+    def _init_doors_and_buttons(self):
+        """Initialize doors and buttons with meaningful placement.
+        Each door that requires a button gets exactly one button per connected component.
+        Places doors SEQUENTIALLY, treating already placed doors as obstacles."""
         self.doors = []
         self.buttons = []
+        
         if self.n_doors == 0:
+            if self.debug:
+                print("No doors requested (n_doors=0)")
             return
-        candidates = self._candidate_cells_using_templates()
-        np.random.shuffle(candidates)
+        
+        # Start with the grid as it is (with obstacles and food sources)
+        current_grid = self.grid.copy()
+        
+        # We'll try to place doors one by one
         placed_doors = 0
-        for y, x in candidates:
-            if placed_doors >= self.n_doors:
+        attempts = 0
+        max_attempts = 100  # Safety limit
+        
+        while placed_doors < self.n_doors and attempts < max_attempts:
+            attempts += 1
+            
+            # Find candidate door positions using templates on CURRENT grid
+            door_candidates = self._find_door_candidates_with_templates(current_grid)
+            
+            if len(door_candidates) == 0:
+                if self.debug:
+                    print("No more door candidates found")
                 break
-            if self.grid[y, x] != TileType.EMPTY:
-                continue
-            cnt = 0
-            for dy, dx in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
-                ny, nx = y + dy, x + dx
-                if 0 <= ny < self.grid_size and 0 <= nx < self.grid_size:
-                    if self._is_passable(self.grid[ny, nx]):
-                        cnt += 1
-            if cnt < 2:
-                continue
-            too_close = False
-            for d in self.doors:
-                if self._manhattan(y, x, d.y, d.x) < 3:
-                    too_close = True
+            
+            # Shuffle candidates
+            np.random.shuffle(door_candidates)
+            
+            door_placed_this_round = False
+            
+            for y, x in door_candidates:
+                if placed_doors >= self.n_doors:
                     break
-            if too_close:
-                continue
-            requires_button = True
-            if self.task_class == TaskClass.DOORS:
-                requires_button = False
-            elif self.task_class == TaskClass.COMPLEX:
-                requires_button = np.random.random() < 0.5
-            door = Door(y=y, x=x, open_duration=self.door_open_duration, close_duration=self.door_close_duration, requires_button=requires_button, can_be_opened=True, is_choke_point=True)
-            if not requires_button:
-                door.is_open = np.random.random() < 0.5
-            self.doors.append(door)
-            self.grid[y, x] = TileType.DOOR_CLOSED
-            self.door_open_array[y, x] = 1 if door.is_open else 0
-            if requires_button and self.n_buttons_per_door != 0:
-                components = self._flood_fill_4way_components_with_door_closed(y, x)
-                meaningful_components = []
-                for comp in components:
-                    if len(comp) >= 3:
-                        empty_cells = [(cy, cx) for cy, cx in comp if self.grid[cy, cx] == TileType.EMPTY]
-                        if empty_cells:
-                            meaningful_components.append(comp)
-                if len(meaningful_components) >= 2:
-                    total_empty = sum(sum(1 for cy, cx in comp if self.grid[cy, cx] == TileType.EMPTY) for comp in meaningful_components)
-                    if total_empty < len(meaningful_components):
-                        if self.debug:
-                            print(f"Skipping door at ({y},{x}): not enough empty cells for buttons across components")
-                        self.doors.pop()
-                        self.grid[y, x] = TileType.EMPTY
-                        self.door_open_array[y, x] = 0
-                        continue
-                    success = self._place_buttons_for_isolated_components(door, len(self.doors) - 1, meaningful_components)
-                    if not success:
-                        if self.debug:
-                            print(f"Skipping door at ({y},{x}): button placement failed (reachability).")
-                        for b in list(self.buttons):
-                            if b.door_idx == len(self.doors) - 1:
-                                try:
-                                    self.grid[b.y, b.x] = TileType.EMPTY
-                                except Exception:
-                                    pass
-                                self.buttons.remove(b)
-                        self.doors.pop()
-                        self.grid[y, x] = TileType.EMPTY
-                        self.door_open_array[y, x] = 0
-                        continue
-                else:
-                    if self.n_buttons_per_door > 0:
-                        self._place_buttons_optimized(door, len(self.doors) - 1)
-            placed_doors += 1
-        if self.debug:
-            print(f"Placed {placed_doors} doors and {len(self.buttons)} buttons.")
-
-    # ---------------- remaining button placement helpers ------------------
-    def _place_buttons_optimized(self, door: Door, door_idx: int):
-        y, x = door.y, door.x
-        components = self._flood_fill_4way_components_with_door_closed(y, x)
-        if not components:
-            return self._place_buttons_simple(door, door_idx)
-        largest = max(components, key=len)
-        empty_cells = [(cy, cx) for cy, cx in largest if self.grid[cy, cx] == TileType.EMPTY]
-        if not empty_cells:
-            all_empty = []
-            for comp in components:
-                for cy, cx in comp:
-                    if self.grid[cy, cx] == TileType.EMPTY:
-                        all_empty.append((cy, cx))
-            empty_cells = all_empty
-        if not empty_cells:
-            return self._place_buttons_simple(door, door_idx)
-        max_allowed_steps = max(0, door.close_duration - 1)
-        temp_grid = self._get_temp_grid_with_auto_doors_open()
-        eligible = [cell for cell in empty_cells if self._is_reachable_within_steps(y, x, cell[0], cell[1], max_allowed_steps, grid_override=temp_grid)]
-        if not eligible:
-            return self._place_buttons_simple(door, door_idx)
-        buttons_to_place = min(self.n_buttons_per_door, len(eligible))
-        np.random.shuffle(eligible)
-        for i in range(buttons_to_place):
-            by, bx = eligible[i]
-            button = Button(y=by, x=bx, door_idx=door_idx, break_probability=self.button_break_probability, is_broken=False)
-            self.buttons.append(button)
-            self.grid[by, bx] = TileType.BUTTON
-
-    def _place_buttons_simple(self, door: Door, door_idx: int):
-        y, x = door.y, door.x
-        empty_cells = []
-        for dy in (-1, 0, 1):
-            for dx in (-1, 0, 1):
-                if dy == 0 and dx == 0:
+                
+                # Don't place doors too close together
+                too_close = False
+                for d in self.doors:
+                    if self._manhattan_distance(y, x, d.y, d.x) < 3:
+                        too_close = True
+                        break
+                
+                if too_close:
                     continue
-                ny, nx = y + dy, x + dx
-                if 0 <= ny < self.grid_size and 0 <= nx < self.grid_size:
-                    if self.grid[ny, nx] == TileType.EMPTY:
-                        empty_cells.append((ny, nx))
-        if not empty_cells:
-            return
-        max_allowed_steps = max(0, door.close_duration - 1)
-        temp_grid = self._get_temp_grid_with_auto_doors_open()
-        eligible = [cell for cell in empty_cells if self._is_reachable_within_steps(y, x, cell[0], cell[1], max_allowed_steps, grid_override=temp_grid)]
-        if not eligible:
-            return
-        buttons_to_place = min(self.n_buttons_per_door, len(eligible))
-        np.random.shuffle(eligible)
-        for i in range(buttons_to_place):
-            by, bx = eligible[i]
-            button = Button(y=by, x=bx, door_idx=door_idx, break_probability=self.button_break_probability, is_broken=False)
-            self.buttons.append(button)
-            self.grid[by, bx] = TileType.BUTTON
+                
+                # Determine if door requires a button
+                requires_button = True
+                if self.task_class == TaskClass.DOORS:
+                    requires_button = False
+                elif self.task_class == TaskClass.COMPLEX:
+                    requires_button = np.random.random() < 0.5
+                
+                if not requires_button:
+                    # Place periodic door (no buttons needed)
+                    door = Door(y=y, x=x, 
+                               open_duration=self.door_open_duration,
+                               close_duration=self.door_close_duration,
+                               requires_button=False,
+                               can_be_opened=True,
+                               is_choke_point=True)
+                    door.is_open = np.random.random() < 0.5
+                    
+                    # Add door to lists and update grid
+                    self.doors.append(door)
+                    self.grid[y, x] = TileType.DOOR_CLOSED
+                    current_grid[y, x] = TileType.DOOR_CLOSED  # Update current grid
+                    self.door_open_array[y, x] = 1 if door.is_open else 0
+                    
+                    placed_doors += 1
+                    door_placed_this_round = True
+                    
+                    if self.debug:
+                        print(f"  Placed periodic door at ({y},{x})")
+                    break  # Break to restart candidate search
+                else:
+                    # Button door - check if we can place it with buttons
+                    can_place, button_positions = self._can_place_door_with_buttons(y, x, current_grid)
+                    
+                    if can_place:
+                        # Place door
+                        door = Door(y=y, x=x, 
+                                   open_duration=self.door_open_duration,
+                                   close_duration=self.door_close_duration,
+                                   requires_button=True,
+                                   can_be_opened=True,
+                                   is_choke_point=True)
+                        
+                        door_idx = len(self.doors)
+                        self.doors.append(door)
+                        self.grid[y, x] = TileType.DOOR_CLOSED
+                        current_grid[y, x] = TileType.DOOR_CLOSED  # Update current grid
+                        self.door_open_array[y, x] = 1 if door.is_open else 0
+                        
+                        # Place buttons
+                        for by, bx in button_positions:
+                            # Button positions should be empty (checked in _can_place_door_with_buttons)
+                            button = Button(y=by, x=bx, door_idx=door_idx,
+                                          break_probability=self.button_break_probability,
+                                          is_broken=False)
+                            self.buttons.append(button)
+                            self.grid[by, bx] = TileType.BUTTON
+                            current_grid[by, bx] = TileType.BUTTON  # Update current grid
+                        
+                        placed_doors += 1
+                        door_placed_this_round = True
+                        
+                        if self.debug:
+                            print(f"  Placed button door at ({y},{x}) with {len(button_positions)} buttons")
+                        break  # Break to restart candidate search
+            
+            if not door_placed_this_round:
+                # Couldn't place any door this round
+                if self.debug:
+                    print(f"Could not place any door in round {attempts}")
+                break
+        
+        if self.debug:
+            print(f"\nPlaced {placed_doors} doors and {len(self.buttons)} buttons total.")
+            for i, door in enumerate(self.doors):
+                door_buttons = [b for b in self.buttons if b.door_idx == i]
+                print(f"  Door {i}: ({door.y},{door.x}), requires_button={door.requires_button}, buttons={len(door_buttons)}")
 
     # ---------------- rest of env (reset/step/render/etc) -----------------
     def reset(self, seed: Optional[int] = None, options: Optional[Dict] = None) -> Tuple[np.ndarray, Dict]:
@@ -694,7 +743,7 @@ class GridMazeWorld(gym.Env):
         self.grid = add_obstacles_connectivity(self.grid, self.n_obstacles)
         self._init_food_sources()
         self.door_open_array = np.zeros((self.grid_size, self.grid_size), dtype=np.uint8)
-        self._init_doors_and_buttons_meaningful()
+        self._init_doors_and_buttons()
         self.food_positions_cache = np.zeros((self.grid_size, self.grid_size), dtype=np.int8)
         self._update_food_cache()
         empty_cells = np.argwhere(self.grid == TileType.EMPTY)

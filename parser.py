@@ -82,8 +82,8 @@ def parse_args():
     train_parser.add_argument("--n-buttons-per-door",
                         type=int,
                         default=1,
-                        choices=[0, 1, 2],
-                        help="Buttons per door (0, 1, or 2)"
+                        choices=[0, 1, 2, 3, 4],
+                        help="Buttons per door"
                     )
     train_parser.add_argument("--door-periodic",
                         action="store_true",
@@ -187,8 +187,8 @@ def parse_args():
     test_parser.add_argument("--n-buttons-per-door",
                         type=int,
                         default=1,
-                        choices=[0, 1, 2],
-                        help="Buttons per door (0, 1, or 2)"
+                        choices=[0, 1, 2, 3, 4],
+                        help="Buttons per door"
                     )
     test_parser.add_argument("--door-periodic",
                         action="store_true",
@@ -268,8 +268,8 @@ def parse_args():
     bench_parser.add_argument("--n-buttons-per-door",
                         type=int,
                         default=1,
-                        choices=[0, 1, 2],
-                        help="Buttons per door (0, 1, or 2)"
+                        choices=[0, 1, 2, 3, 4],
+                        help="Buttons per door"
                     )
     
     # Visualize command
