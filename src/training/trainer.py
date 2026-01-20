@@ -21,6 +21,8 @@ from src.core.utils import setup_logging, seed_everything
 from .losses import PolicyLoss, AuxiliaryLoss
 from .optimizers import GradientClipper, LearningRateScheduler
 
+import cv2
+
 
 class ComplexityManager:
     """Manages dynamic complexity adjustment based on agent performance"""
@@ -38,30 +40,41 @@ class ComplexityManager:
         self.min_complexity = self.training_config.get('min_complexity', 0.0)
         self.max_complexity = self.training_config.get('max_complexity', 1.0)
         self.adjustment_interval = self.training_config.get('adjustment_interval', 500)
+        self.stagnation_threshold = self.training_config.get('stagnation_threshold', 10)  # epochs without progress
+        self.stagnation_check_interval = self.training_config.get('stagnation_check_interval', 100)  # NEW: check every 100 episodes
+        self.min_basic_complexity = self.training_config.get('min_basic_complexity', 0.3)  # NEW: minimum before switching from basic
         self.curriculum_stages = self.training_config.get('curriculum_stages', 
                                                          ["basic", "doors", "buttons", "complex"])
         
-        # Current state
+        # Current state - each stage maintains its own complexity
         self.current_stage_idx = 0
-        self.current_complexity = config['environment'].get('complexity_level', 0.0)
+        self.stage_complexities = {stage: config['environment'].get('complexity_level', 0.0) 
+                                  for stage in self.curriculum_stages}
+        
+        # Performance tracking
         self.performance_history = deque(maxlen=self.performance_window)
         self.max_rewards_by_stage = {}
+        self.epochs_without_progress = 0  # Tracks stagnation
+        self.last_max_reward = -float('inf')
+        self.last_stagnation_check = 0  # NEW: track when we last checked for stagnation
         
         # Statistics
         self.adjustments_made = 0
         self.last_adjustment_epoch = 0
-        
-        # Performance normalization
-        #self.performance_normalization = {
-        #    "basic": 1.0,
-        #    "doors": 0.8,
-        #    "buttons": 0.6,
-        #    "complex": 0.4
-        #}
-    
+        self.stage_switches = 0  # Track how many times we switch tasks
+
     def add_performance(self, reward: float, epoch: int):
         """Add performance metric to history"""
         self.performance_history.append(reward)
+        
+        # Check for progress in current stage
+        current_max = self.max_rewards_by_stage.get(self.current_stage_idx, reward)
+        if reward > current_max:
+            self.max_rewards_by_stage[self.current_stage_idx] = reward
+            self.epochs_without_progress = 0
+            self.last_max_reward = reward
+        else:
+            self.epochs_without_progress += 1
     
     def get_current_task_class(self) -> str:
         """Get current task class based on curriculum stage"""
@@ -73,7 +86,9 @@ class ComplexityManager:
         """Get current complexity level"""
         if not self.enabled:
             return self.config['environment'].get('complexity_level', 0.0)
-        return self.current_complexity
+        
+        current_stage = self.get_current_task_class()
+        return self.stage_complexities[current_stage]
     
     def should_adjust(self, epoch: int) -> bool:
         """Check if we should adjust complexity"""
@@ -89,57 +104,125 @@ class ComplexityManager:
             return False
         
         return True
-
-    """
-    def calculate_performance_score(self) -> float:
-        if not self.performance_history:
-            return 0.0
-        
-        avg_performance = np.mean(list(self.performance_history))
-        current_stage = self.get_current_task_class()
-        
-        # Normalize by task difficulty
-        normalization = self.performance_normalization.get(current_stage, 1.0)
-        normalized_performance = avg_performance / normalization
-        
-        # Clip to 0-1 range
-        return max(0.0, min(1.0, normalized_performance))
-    """
     
+    def should_switch_stage(self, epoch: int) -> bool:
+        """Check if we should switch to a different task due to stagnation"""
+        if not self.enabled:
+            return False
+        
+        # NEW: Only check stagnation every stagnation_check_interval episodes
+        if epoch - self.last_stagnation_check < self.stagnation_check_interval:
+            return False
+        
+        self.last_stagnation_check = epoch  # Update last check time
+        
+        current_stage = self.get_current_task_class()
+        current_complexity = self.stage_complexities[current_stage]
+        
+        # NEW: Prevent switching from basic until it reaches minimum complexity
+        if current_stage == 'basic' and current_complexity < self.min_basic_complexity:
+            return False
+        
+        # Switch if we've been stuck for too long
+        if self.epochs_without_progress >= self.stagnation_threshold:
+            return True
+        
+        # Optional: Check for oscillation (could be enhanced with more sophisticated detection)
+        if len(self.performance_history) >= self.performance_window:
+            recent_std = np.std(list(self.performance_history)[-self.performance_window//2:])
+            recent_mean = np.mean(list(self.performance_history)[-self.performance_window//2:])
+            if recent_std < 0.1 and recent_mean < self.decrease_threshold:
+                return True  # Stuck at low performance with little variation
+        
+        return False
+
     def calculate_performance_score(self) -> float:
         if not self.performance_history:
             return 0.0
         
         avg_performance = np.mean(list(self.performance_history))
         
-        # Track maximum reward seen for each task class
-        if self.current_stage_idx not in self.max_rewards_by_stage:
-            self.max_rewards_by_stage[self.current_stage_idx] = avg_performance
+        # Track maximum reward seen for current stage
+        current_stage = self.get_current_task_class()
+        stage_idx = self.current_stage_idx
+        
+        if stage_idx not in self.max_rewards_by_stage:
+            self.max_rewards_by_stage[stage_idx] = avg_performance
         else:
-            self.max_rewards_by_stage[self.current_stage_idx] = max(
-                self.max_rewards_by_stage[self.current_stage_idx],
+            self.max_rewards_by_stage[stage_idx] = max(
+                self.max_rewards_by_stage[stage_idx],
                 avg_performance
             )
         
-        max_reward = self.max_rewards_by_stage[self.current_stage_idx]
+        max_reward = self.max_rewards_by_stage[stage_idx]
         
         # Avoid division by zero
         if max_reward < 0.1:
             return 0.0
         
-        # Normalize by maximum observed reward
+        # Normalize by maximum observed reward for current stage
         normalized = avg_performance / max_reward
         return max(0.0, min(1.0, normalized))
 
+    def switch_to_next_stage(self) -> Dict[str, Any]:
+        """Switch to next task in curriculum, maintaining each task's complexity"""
+        old_stage_idx = self.current_stage_idx
+        old_stage = self.curriculum_stages[old_stage_idx]
+        old_complexity = self.stage_complexities[old_stage]
+        
+        # Choose next stage (round robin, but could be random or based on other criteria)
+        next_idx = (old_stage_idx + 1) % len(self.curriculum_stages)
+        
+        # NEW: Ensure we don't switch back to basic unless all other tasks are at high complexity
+        if next_idx == 0 and old_stage_idx > 0:
+            # Check if other stages are mastered enough to return to basic
+            other_stages_mastered = all(
+                self.stage_complexities[stage] >= 0.8 
+                for stage in self.curriculum_stages[1:]
+            )
+            
+            if not other_stages_mastered:
+                # Skip basic and go to the next non-basic stage
+                next_idx = 1 if len(self.curriculum_stages) > 1 else 0
+        
+        self.current_stage_idx = next_idx
+        new_stage = self.curriculum_stages[next_idx]
+        new_complexity = self.stage_complexities[new_stage]
+        
+        # Reset stagnation tracking
+        self.epochs_without_progress = 0
+        self.last_max_reward = -float('inf')
+        self.performance_history.clear()
+        self.stage_switches += 1
+        
+        adjustment_info = {
+            "action": "switched_stage_due_to_stagnation",
+            "old_stage": old_stage,
+            "new_stage": new_stage,
+            "old_complexity": old_complexity,
+            "new_complexity": new_complexity,
+            "adjusted": True,
+            "reason": f"Stagnation for {self.epochs_without_progress} epochs"
+        }
+        
+        return adjustment_info
     
     def adjust_complexity(self, epoch: int) -> Optional[Dict[str, Any]]:
-        """Adjust complexity based on performance"""
+        """Adjust complexity based on performance, with task switching for stagnation"""
         if not self.should_adjust(epoch):
             return None
         
+        # First check if we should switch tasks due to stagnation
+        if self.should_switch_stage(epoch):  # NEW: Pass epoch parameter
+            adjustment_info = self.switch_to_next_stage()
+            self.adjustments_made += 1
+            self.last_adjustment_epoch = epoch
+            return adjustment_info
+        
+        # Otherwise, proceed with normal complexity adjustment
         performance_score = self.calculate_performance_score()
         current_stage = self.get_current_task_class()
-        old_complexity = self.current_complexity
+        old_complexity = self.stage_complexities[current_stage]
         
         adjustment_info = {
             "old_complexity": old_complexity,
@@ -148,44 +231,40 @@ class ComplexityManager:
             "adjusted": False
         }
         
-        # Check if we should increase complexity or advance to next stage
-        if performance_score > self.increase_threshold:
-            # First try to increase complexity within current stage
-            if self.current_complexity < self.max_complexity:
-                self.current_complexity = min(self.max_complexity, 
-                                            self.current_complexity + self.complexity_step)
+        # NEW: Special rule for basic stage - focus on reaching minimum complexity
+        if current_stage == 'basic' and old_complexity < self.min_basic_complexity:
+            # Force complexity increase for basic until we reach minimum
+            if performance_score > 0.8:  # Lower threshold for basic when building up
+                new_complexity = min(self.min_basic_complexity, 
+                                   old_complexity + self.complexity_step)
+                self.stage_complexities[current_stage] = new_complexity
+                adjustment_info["action"] = "forced_increase_basic"
+                adjustment_info["new_complexity"] = new_complexity
+                adjustment_info["new_stage"] = current_stage
+                adjustment_info["adjusted"] = True
+                self.epochs_without_progress = 0
+        # Normal complexity adjustment for other stages or basic after minimum
+        elif performance_score > self.increase_threshold:
+            # Increase complexity for current stage
+            new_complexity = min(self.max_complexity, 
+                               old_complexity + self.complexity_step)
+            if new_complexity > old_complexity:
+                self.stage_complexities[current_stage] = new_complexity
                 adjustment_info["action"] = "increased_complexity"
-                adjustment_info["new_complexity"] = self.current_complexity
+                adjustment_info["new_complexity"] = new_complexity
                 adjustment_info["new_stage"] = current_stage
                 adjustment_info["adjusted"] = True
-            
-            # If at max complexity, move to next stage
-            elif self.current_stage_idx < len(self.curriculum_stages) - 1:
-                self.current_stage_idx += 1
-                self.current_complexity = self.min_complexity  # Reset complexity for new stage
-                adjustment_info["action"] = "advanced_stage"
-                adjustment_info["new_complexity"] = self.current_complexity
-                adjustment_info["new_stage"] = self.get_current_task_class()
-                adjustment_info["adjusted"] = True
+                self.epochs_without_progress = 0  # Reset stagnation counter
         
-        # Check if we should decrease complexity or go back a stage
         elif performance_score < self.decrease_threshold:
-            # First try to decrease complexity within current stage
-            if self.current_complexity > self.min_complexity:
-                self.current_complexity = max(self.min_complexity,
-                                            self.current_complexity - self.complexity_step)
+            # Decrease complexity for current stage
+            new_complexity = max(self.min_complexity,
+                               old_complexity - self.complexity_step)
+            if new_complexity < old_complexity:
+                self.stage_complexities[current_stage] = new_complexity
                 adjustment_info["action"] = "decreased_complexity"
-                adjustment_info["new_complexity"] = self.current_complexity
+                adjustment_info["new_complexity"] = new_complexity
                 adjustment_info["new_stage"] = current_stage
-                adjustment_info["adjusted"] = True
-            
-            # If at min complexity, move back a stage
-            elif self.current_stage_idx > 0:
-                self.current_stage_idx -= 1
-                self.current_complexity = self.max_complexity  # Start at max of previous stage
-                adjustment_info["action"] = "regressed_stage"
-                adjustment_info["new_complexity"] = self.current_complexity
-                adjustment_info["new_stage"] = self.get_current_task_class()
                 adjustment_info["adjusted"] = True
         
         if adjustment_info["adjusted"]:
@@ -200,22 +279,60 @@ class ComplexityManager:
         env_config = self.config['environment'].copy()
         
         if self.enabled:
-            env_config['task_class'] = self.get_current_task_class()
-            env_config['complexity_level'] = self.current_complexity
+            current_stage = self.get_current_task_class()
+            env_config['task_class'] = current_stage
+            env_config['complexity_level'] = self.stage_complexities[current_stage]
+            
+            # CRITICAL: Set door parameters appropriately for each stage
+            if current_stage == 'basic':
+                # Basic stage: no doors
+                env_config['n_doors'] = 0
+                env_config['n_buttons_per_door'] = 0
+                env_config['door_periodic'] = False
+                env_config['button_break_probability'] = 0.0
+                
+            elif current_stage == 'doors':
+                # Doors stage: periodic doors, no buttons
+                env_config['n_doors'] = -1
+                env_config['n_buttons_per_door'] = 0
+                env_config['door_periodic'] = True
+                env_config['button_break_probability'] = 0.0
+                
+            elif current_stage == 'buttons':
+                # Buttons stage: doors with buttons
+                env_config['n_doors'] = -1
+                env_config['n_buttons_per_door'] = -1
+                env_config['door_periodic'] = False
+                env_config['button_break_probability'] = -1.0
+                
+            elif current_stage == 'complex':
+                # Complex stage: mix of periodic and button doors
+                env_config['n_doors'] = -1
+                env_config['n_buttons_per_door'] = -1
+                env_config['door_periodic'] = True  # Some doors periodic
+                env_config['button_break_probability'] = -1.0
         
         return env_config
     
     def get_status(self) -> Dict[str, Any]:
         """Get current status of complexity manager"""
+        current_stage = self.get_current_task_class()
+        
         return {
             "enabled": self.enabled,
-            "current_stage": self.get_current_task_class(),
-            "current_complexity": self.current_complexity,
+            "current_stage": current_stage,
+            "current_complexity": self.stage_complexities[current_stage],
+            "all_stage_complexities": self.stage_complexities,
             "stage_index": self.current_stage_idx,
             "total_stages": len(self.curriculum_stages),
             "performance_history_size": len(self.performance_history),
             "adjustments_made": self.adjustments_made,
-            "performance_score": self.calculate_performance_score() if self.performance_history else 0.0
+            "stage_switches": self.stage_switches,
+            "epochs_without_progress": self.epochs_without_progress,
+            "last_stagnation_check": self.last_stagnation_check,
+            "performance_score": self.calculate_performance_score() if self.performance_history else 0.0,
+            "max_rewards_by_stage": self.max_rewards_by_stage,
+            "basic_min_complexity_reached": self.stage_complexities['basic'] >= self.min_basic_complexity
         }
 
 
@@ -315,10 +432,123 @@ class AdaptiveParallelTrainer:
                 name=self.experiment_name,
                 config=config
             )
+
+
+    def _visualize_current_environments(self, epoch: int):
+        """Visualize a sample of current training environments"""
+        print(f"\n📸 DEBUG: Visualizing environments at epoch {epoch}")
+        
+        # Get current complexity status
+        status = self.complexity_manager.get_status()
+        print(f"  Stage: {status['current_stage']}")
+        print(f"  Complexity: {status['current_complexity']:.2f}")
+        print(f"  n_doors parameter: {self.vector_env.envs[0].n_doors}")
+        print(f"  Actual doors created: {len(self.vector_env.envs[0].doors)}")
+        print(f"  Actual buttons created: {len(self.vector_env.envs[0].buttons)}")
+        
+        # Visualize first N environments (e.g., 4)
+        num_to_show = min(4, len(self.vector_env.envs))
+        
+        # Create a grid of environments
+        cell_size = 256
+        padding = 10
+        cols = 2
+        rows = (num_to_show + cols - 1) // cols
+        
+        total_width = cols * cell_size + (cols + 1) * padding
+        total_height = rows * cell_size + (rows + 1) * padding
+        
+        combined_image = np.zeros((total_height, total_width, 3), dtype=np.uint8)
+        
+        for i in range(num_to_show):
+            env = self.vector_env.envs[i]
+            
+            # Print environment info
+            print(f"\n  Environment {i}:")
+            print(f"    Grid size: {env.grid_size}")
+            if hasattr(env, 'agent_pos') and env.agent_pos is not None:
+                print(f"    Agent position: ({env.agent_pos[0]}, {env.agent_pos[1]})")
+            print(f"    Doors: {len(env.doors)}")
+            print(f"    Buttons: {len(env.buttons)}")
+            if env.doors:
+                for j, door in enumerate(env.doors[:3]):  # Show first 3 doors
+                    print(f"      Door {j}: ({door.y},{door.x}), open={door.is_open}, needs_button={door.requires_button}")
+            if env.buttons:
+                for j, button in enumerate(env.buttons[:3]):  # Show first 3 buttons
+                    print(f"      Button {j}: ({button.y},{button.x}), broken={button.is_broken}, door_idx={button.door_idx}")
+            
+            # Get the rendered frame
+            # Temporarily enable rendering by calling the parent class's render method
+            try:
+                # Store original render size
+                original_render_size = env.render_size
+                
+                # Temporarily set render size to enable rendering
+                env.render_size = cell_size
+                
+                # Clear the render buffer to force re-render
+                if hasattr(env, '_render_buffer'):
+                    env._render_buffer = None
+                
+                # Call the parent class's render method (GridMazeWorld.render)
+                # We need to call it through super()
+                frame = super(type(env), env).render()
+                
+                # Restore original render size
+                env.render_size = original_render_size
+                
+                if frame is None:
+                    frame = np.zeros((cell_size, cell_size, 3), dtype=np.uint8)
+                    cv2.putText(frame, f"Env {i}", (10, 30), 
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+            except Exception as e:
+                print(f"    Warning: Could not render environment {i}: {e}")
+                frame = np.zeros((cell_size, cell_size, 3), dtype=np.uint8)
+                cv2.putText(frame, f"Error: {str(e)[:20]}", (10, 30), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 1)
+            
+            # Resize to cell size if needed
+            if frame.shape[0] != cell_size or frame.shape[1] != cell_size:
+                frame = cv2.resize(frame, (cell_size, cell_size))
+            
+            # Calculate position
+            col = i % cols
+            row = i // cols
+            
+            x_start = padding + col * (cell_size + padding)
+            y_start = padding + row * (cell_size + padding)
+            
+            # Place frame in combined image
+            combined_image[y_start:y_start+cell_size, x_start:x_start+cell_size] = frame
+        
+        # Add title/header to the image
+        title = f"Epoch {epoch}: {status['current_stage']} (Complexity: {status['current_complexity']:.2f})"
+        cv2.putText(combined_image, title, (10, 30), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+        
+        info = f"Doors: {len(self.vector_env.envs[0].doors)}, Buttons: {len(self.vector_env.envs[0].buttons)}"
+        cv2.putText(combined_image, info, (10, 60), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 1)
+        
+        # Show the image
+        cv2.imshow('Training Visualization', combined_image)
+        
+        # Wait for key press to continue
+        print("\n👀 Press any key to continue training...")
+        cv2.waitKey(0)
+        
     
     def _create_vectorized_env(self) -> VectorizedMazeEnv:
         """Create vectorized training environment with current complexity"""
         env_config = self.complexity_manager.get_environment_config()
+        # DEBUG: Print current environment config
+        current_stage = self.complexity_manager.get_current_task_class()
+        current_complexity = self.complexity_manager.get_current_complexity()
+
+        #print(f"\n🚪 DEBUG: Creating vectorized env - Stage: {current_stage}, Complexity: {current_complexity:.2f}")
+        #print(f"   n_doors in config: {env_config.get('n_doors', 0)}")
+        #print(f"   task_class in config: {env_config.get('task_class', 'basic')}")
+
         return VectorizedMazeEnv(
             num_envs=self.batch_size,
             env_config=env_config
@@ -332,8 +562,8 @@ class AdaptiveParallelTrainer:
         
         # Create new environment
         self.vector_env = self._create_vectorized_env()
-        self.logger.info(f"Recreated environment with task_class: {self.complexity_manager.get_current_task_class()}, "
-                        f"complexity: {self.complexity_manager.get_current_complexity():.2f}")
+        #self.logger.info(f"Recreated environment with task_class: {self.complexity_manager.get_current_task_class()}, "
+        #                f"complexity: {self.complexity_manager.get_current_complexity():.2f}")
     
     def _create_agent(self) -> Agent:
         """Create agent with specified network"""
@@ -381,6 +611,11 @@ class AdaptiveParallelTrainer:
     
     def train(self):
         """Main training loop with parallel execution and dynamic complexity"""
+        print("\n🎮 Training Controls:")
+        print("  Press 'v' during training to visualize current environments")
+        print("  Press 'q' to stop training early")
+        print("=" * 50)
+
         training_config = self.config['training']
         epochs = training_config.get('epochs', 10000)
         save_interval = training_config.get('save_interval', 1000)
@@ -394,8 +629,36 @@ class AdaptiveParallelTrainer:
         # Log initial complexity status
         complexity_status = self.complexity_manager.get_status()
         self.logger.info(f"Initial complexity status: {complexity_status}")
+
+
+        cv2.namedWindow('Training Controls', cv2.WINDOW_NORMAL)
+        cv2.resizeWindow('Training Controls', 400, 100)
+        cv2.putText(np.zeros((100, 400, 3), dtype=np.uint8), "Press 'v' to visualize", (10, 30), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+        cv2.putText(np.zeros((100, 400, 3), dtype=np.uint8), "Press 'q' to quit", (10, 60), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+        cv2.imshow('Training Controls', np.zeros((100, 400, 3), dtype=np.uint8))
+        cv2.waitKey(1)  # Force window creation
         
         for epoch in pbar:
+
+            key = cv2.waitKey(1) & 0xFF
+            
+            if key == ord('v'):  # 'v' key pressed
+                print(f"\n📸 Key 'v' detected! Visualizing environments at epoch {epoch}")
+                self._visualize_current_environments(epoch)
+                # Force window focus back to control window
+                cv2.imshow('Training Controls', np.zeros((100, 400, 3), dtype=np.uint8))
+                
+            elif key == ord('q'):  # 'q' key pressed
+                print("\n⚠️  User pressed 'q' - early stop requested.")
+                self._save_model('interrupted')
+                cv2.destroyAllWindows()
+                break
+            
+            elif key != 255:  # 255 means no key pressed
+                print(f"Key pressed: {key} (char: {chr(key) if key < 128 else key})")
+
             epoch_start = time.time()
             
             # Training phase with timing
@@ -453,6 +716,8 @@ class AdaptiveParallelTrainer:
             # Get current complexity info
             current_stage = self.complexity_manager.get_current_task_class()
             current_complexity = self.complexity_manager.get_current_complexity()
+
+            perf_score = self.complexity_manager.calculate_performance_score()
             
             pbar.set_postfix({
                 'reward': f"{train_metrics['reward']:.2f}",
@@ -460,6 +725,7 @@ class AdaptiveParallelTrainer:
                 'best': f"{self.metrics['best_reward']:.2f}",
                 'stage': current_stage,
                 'comp': f"{current_complexity:.2f}",
+                'perf': f"{perf_score:.2f}",
                 'adj': self.complexity_manager.adjustments_made,
                 'eps/s': f"{self.batch_size/(avg_coll_time+avg_train_time):.1f}",
             })
@@ -520,11 +786,11 @@ class AdaptiveParallelTrainer:
         new_stage = adjustment.get('new_stage', 'basic')
         
         # Log the adjustment
-        self.logger.info(f"Complexity adjustment at epoch {epoch}:")
-        self.logger.info(f"  Action: {action}")
-        self.logger.info(f"  Stage: {old_stage} -> {new_stage}")
-        self.logger.info(f"  Complexity: {old_complexity:.2f} -> {new_complexity:.2f}")
-        self.logger.info(f"  Performance score: {adjustment.get('performance_score', 0.0):.2f}")
+        #self.logger.info(f"Complexity adjustment at epoch {epoch}:")
+        #self.logger.info(f"  Action: {action}")
+        #self.logger.info(f"  Stage: {old_stage} -> {new_stage}")
+        #self.logger.info(f"  Complexity: {old_complexity:.2f} -> {new_complexity:.2f}")
+        #self.logger.info(f"  Performance score: {adjustment.get('performance_score', 0.0):.2f}")
         
         # Recreate environment with new complexity
         if old_stage != new_stage or abs(old_complexity - new_complexity) > 0.01:
@@ -795,7 +1061,7 @@ class AdaptiveParallelTrainer:
             'metrics': self.metrics,
             'complexity_manager_state': {
                 'current_stage_idx': self.complexity_manager.current_stage_idx,
-                'current_complexity': self.complexity_manager.current_complexity,
+                'current_complexity': self.complexity_manager.get_current_complexity(),
                 'performance_history': list(self.complexity_manager.performance_history),
                 'adjustments_made': self.complexity_manager.adjustments_made,
                 'last_adjustment_epoch': self.complexity_manager.last_adjustment_epoch

@@ -377,13 +377,13 @@ class GridMazeWorld(gym.Env):
             [-1, -1, -1]
             ], dtype=np.int8)
 
-        base_templates = [T_vert, T_horiz, T_diag1, T_diag2, T_a, T_b, T_c, T_d, T_e, T_f, T_g, T_h]
-        self.templates = []
-        for idx, base in enumerate(base_templates):
-            for rot in range(4):
-                mat = np.rot90(base, k=rot)
-                name = f"T{idx}_r{rot}"
-                self.templates.append((mat, name))
+        self.templates = [T_vert, T_horiz, T_diag1, T_diag2, T_a, T_b, T_c, T_d, T_e, T_f, T_g, T_h]
+        #self.templates = []
+        #for idx, base in enumerate(base_templates):
+        #    for rot in range(4):
+        #        mat = np.rot90(base, k=rot)
+        #        name = f"T{idx}_r{rot}"
+        #        self.templates.append((mat, name))
         self.templates.sort(key=lambda tn: np.sum(tn[0] != -1), reverse=True)
 
     def _matches_template(self, y: int, x: int, template: np.ndarray, grid_override: Optional[np.ndarray] = None) -> bool:
@@ -530,7 +530,7 @@ class GridMazeWorld(gym.Env):
                 
                 # Check if this position matches any template
                 matches_template = False
-                for tpl, _name in self.templates:
+                for tpl in self.templates:
                     if self._matches_template(y, x, tpl, grid_override=temp_grid):
                         matches_template = True
                         break

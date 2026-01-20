@@ -506,7 +506,7 @@ class Benchmark:
                 )
                 
                 # Create environment
-                env = GridMazeWorld(grid_size=11, max_steps=50)
+                env = GridMazeWorld(grid_size=11, max_steps=100)
                 
                 # Run evaluation
                 rewards = []

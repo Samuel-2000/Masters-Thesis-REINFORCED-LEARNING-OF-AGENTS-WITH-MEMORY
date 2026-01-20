@@ -2,6 +2,12 @@ Heavily Inspired by: https://github.com/michal-hradis/maze-rl
 
 
 
+python run.py test --play --task-class complex --complexity-level 0.7 --n-doors 5 --n-buttons-per-door 4
+python run.py test --model .\models\lstm\lstm_64b_0.0005lr_2026-01-14_08-33-02_dynamic_best.pt --dynamic --episodes 1
+python run.py test --model models/lstm_64b_0.0005lr_2026-01-20_14-57-16_dynamic_best.pt --dynamic --episodes 1 --save-video
+
+
+
 run.py (check parser.py for args)
 
 run.py train
@@ -40,6 +46,17 @@ python run.py test --model models/lstm_best.pt --dynamic --visualize
 
 # Test with custom number of episodes
 python run.py test --model models/lstm_best.pt --dynamic --episodes 5 --save-video
+
+
+
+train --network-type lstm --epochs 10000 --batch-size 64 --dynamic-complexity --performance-window 20 --adjustment-interval 1 --save-dir test_dynamic
+train --network-type lstm --epochs 10000 --batch-size 64 --task-class buttons --complexity-level 1.0 --n-doors 4
+
+
+
+
+
+
 
 
 batch_train.py

@@ -7,10 +7,9 @@ __pycache__/
 *.mp4
 *.wandb
 *checkpoint.pt
-*final.pt
 *.json
 
 
-*.pt
-*.png
+
+
 *.txt

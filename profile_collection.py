@@ -86,7 +86,7 @@ def create_full_scale_trainer():
         },
         'environment': {
             'grid_size': 11,
-            'max_steps': 50,  # default
+            'max_steps': 100,
             'obstacle_fraction': 0.25,
             'n_food_sources': 4,
             'food_energy': 10.0,
@@ -378,7 +378,7 @@ def save_profiling_results(metrics, detailed_times):
             'batch_size': 64,
             'hidden_size': 512,
             'grid_size': 11,
-            'max_steps': 50
+            'max_steps': 100
         },
         'summary_metrics': metrics,
         'detailed_times': {k: v.tolist() if isinstance(v, np.ndarray) else v 

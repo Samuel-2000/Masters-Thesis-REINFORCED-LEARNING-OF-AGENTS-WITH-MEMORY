@@ -342,7 +342,7 @@ class Visualizer:
     def create_comparison_video(self,
                                agents: List[Tuple[str, Agent]],
                                env_config: Optional[Dict] = None,
-                               max_steps: int = 50,
+                               max_steps: int = 100,
                                output_path: str = "comparison.mp4") -> str:
         """Create side-by-side comparison video of multiple agents"""
         if env_config is None:

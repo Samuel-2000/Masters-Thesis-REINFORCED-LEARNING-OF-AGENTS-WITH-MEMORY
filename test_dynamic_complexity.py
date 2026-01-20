@@ -178,7 +178,7 @@ def test_backward_compatibility():
     old_config = {
         'environment': {
             'grid_size': 11,
-            'max_steps': 50,
+            'max_steps': 100,
             'obstacle_fraction': 0.25
         },
         'training': {

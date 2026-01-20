@@ -108,12 +108,12 @@ def parse_args():
                     )
     train_parser.add_argument("--complexity-increase-threshold",
                         type=float,
-                        default=0.7,
+                        default=0.95,
                         help="Performance threshold to increase complexity (0.0 to 1.0)"
                     )
     train_parser.add_argument("--complexity-decrease-threshold",
                         type=float,
-                        default=0.3,
+                        default=0.7,
                         help="Performance threshold to decrease complexity (0.0 to 1.0)"
                     )
     train_parser.add_argument("--complexity-step",
