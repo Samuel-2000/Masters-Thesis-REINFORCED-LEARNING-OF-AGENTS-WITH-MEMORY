@@ -22,6 +22,74 @@ from .constants import (
     action_to_token, grid_tile_to_observation_token
 )
 
+
+
+@njit(cache=True)
+def _label_components_numba_inplace(pass_mask: np.ndarray, labels: np.ndarray):
+    """
+    In-place 4-connected component labeling.
+    pass_mask: uint8 array with 0/1
+    labels: int32 array (output), will be overwritten
+    Returns number of components.
+    """
+    h, w = pass_mask.shape
+    labels[:] = 0
+    nlabels = 0
+
+    maxsize = h * w
+    stack_y = np.empty(maxsize, dtype=np.int32)
+    stack_x = np.empty(maxsize, dtype=np.int32)
+
+    for i in range(h):
+        for j in range(w):
+            if pass_mask[i, j] == 1 and labels[i, j] == 0:
+                nlabels += 1
+                lab = nlabels
+
+                top = 0
+                stack_y[top] = i
+                stack_x[top] = j
+                top += 1
+                labels[i, j] = lab
+
+                while top > 0:
+                    top -= 1
+                    cy = stack_y[top]
+                    cx = stack_x[top]
+
+                    # up
+                    ny = cy - 1
+                    if ny >= 0 and pass_mask[ny, cx] == 1 and labels[ny, cx] == 0:
+                        labels[ny, cx] = lab
+                        stack_y[top] = ny
+                        stack_x[top] = cx
+                        top += 1
+                    # down
+                    ny = cy + 1
+                    if ny < h and pass_mask[ny, cx] == 1 and labels[ny, cx] == 0:
+                        labels[ny, cx] = lab
+                        stack_y[top] = ny
+                        stack_x[top] = cx
+                        top += 1
+                    # left
+                    nx = cx - 1
+                    if nx >= 0 and pass_mask[cy, nx] == 1 and labels[cy, nx] == 0:
+                        labels[cy, nx] = lab
+                        stack_y[top] = cy
+                        stack_x[top] = nx
+                        top += 1
+                    # right
+                    nx = cx + 1
+                    if nx < w and pass_mask[cy, nx] == 1 and labels[cy, nx] == 0:
+                        labels[cy, nx] = lab
+                        stack_y[top] = cy
+                        stack_x[top] = nx
+                        top += 1
+
+    return nlabels
+
+
+
 # --------------------- Data classes ----------------------------------
 @dataclass
 class Door:
@@ -416,6 +484,88 @@ def get_observation_optimized(y: int, x: int, grid: np.ndarray, food_sources: np
     return obs
 
 
+# ---------------------- Numba-accelerated BFS reachable mask -----------------
+@njit(cache=True)
+def bfs_reachable_mask(passable_mask: np.ndarray, h: int, w: int,
+                       sy: int, sx: int, maxdist: int) -> np.ndarray:
+    """
+    Return a uint8 mask (h,w) where mask[y,x]==1 iff (y,x) is reachable
+    from (sy,sx) within maxdist steps using 4-neighbour moves and only
+    traversing passable cells (passable_mask==1). The start cell is included
+    (distance 0).
+    """
+    visited = np.zeros((h, w), dtype=np.uint8)
+    # simple circular queue arrays sized to h*w
+    qy = np.empty(h * w, dtype=np.int32)
+    qx = np.empty(h * w, dtype=np.int32)
+    qd = np.empty(h * w, dtype=np.int32)
+    head = 0
+    tail = 0
+
+    # if start not passable, return empty mask
+    if passable_mask[sy, sx] == 0:
+        return visited
+
+    visited[sy, sx] = 1
+    qy[tail] = sy
+    qx[tail] = sx
+    qd[tail] = 0
+    tail += 1
+
+    while head < tail:
+        cy = qy[head]
+        cx = qx[head]
+        cd = qd[head]
+        head += 1
+
+        if cd >= maxdist:
+            continue
+
+        # 4-neighborhood
+        # up
+        ny = cy - 1
+        nx = cx
+        if ny >= 0:
+            if visited[ny, nx] == 0 and passable_mask[ny, nx] == 1:
+                visited[ny, nx] = 1
+                qy[tail] = ny
+                qx[tail] = nx
+                qd[tail] = cd + 1
+                tail += 1
+        # down
+        ny = cy + 1
+        nx = cx
+        if ny < h:
+            if visited[ny, nx] == 0 and passable_mask[ny, nx] == 1:
+                visited[ny, nx] = 1
+                qy[tail] = ny
+                qx[tail] = nx
+                qd[tail] = cd + 1
+                tail += 1
+        # left
+        ny = cy
+        nx = cx - 1
+        if nx >= 0:
+            if visited[ny, nx] == 0 and passable_mask[ny, nx] == 1:
+                visited[ny, nx] = 1
+                qy[tail] = ny
+                qx[tail] = nx
+                qd[tail] = cd + 1
+                tail += 1
+        # right
+        ny = cy
+        nx = cx + 1
+        if nx < w:
+            if visited[ny, nx] == 0 and passable_mask[ny, nx] == 1:
+                visited[ny, nx] = 1
+                qy[tail] = ny
+                qx[tail] = nx
+                qd[tail] = cd + 1
+                tail += 1
+
+    return visited
+
+
 # ------------------------- GridMazeWorld -------------------------------
 class GridMazeWorld(gym.Env):
     def __init__(self, grid_size: int = DEFAULT_GRID_SIZE, max_steps: int = DEFAULT_MAX_STEPS,
@@ -460,6 +610,8 @@ class GridMazeWorld(gym.Env):
         self.colors = TILE_COLORS
         self.debug = False
 
+
+
         # Create optimized template matcher using 16 templates
         templates_flat = self._templates_flat_list()
         self.template_matcher = FastTemplateMatcher(templates_flat, max_depth=4)
@@ -467,6 +619,11 @@ class GridMazeWorld(gym.Env):
         # Precompute door proximity offsets
         self._door_check_offsets = [(-1, -1), (-1, 0), (-1, 1), (0, -1),
                                     (0, 1), (1, -1), (1, 0), (1, 1)]
+        
+
+        self._passable_mask = np.zeros((self.grid_size, self.grid_size), dtype=np.uint8)
+        self._labels = np.zeros((self.grid_size, self.grid_size), dtype=np.int32)
+
 
     def _adjust_parameters_by_task_class(self):
         if self.task_class == TaskClass.BASIC:
@@ -535,38 +692,64 @@ class GridMazeWorld(gym.Env):
     def _manhattan_distance(self, a_y: int, a_x: int, b_y: int, b_x: int) -> int:
         return abs(a_y - b_y) + abs(a_x - b_x)
 
-    def _find_regions_separated_by_door(self, door_y: int, door_x: int, grid_to_use: np.ndarray) -> List[List[Tuple[int, int]]]:
-        """Find all regions (connected components) that would be separated if this door were closed."""
-        temp_grid = grid_to_use.copy()
-        temp_grid[door_y, door_x] = TileType.OBSTACLE
-        grid_h, grid_w = self.grid_size, self.grid_size
-        visited = np.zeros((grid_h, grid_w), dtype=bool)
-        directions = [(-1, 0), (1, 0), (0, -1), (0, 1)]
-        regions = []
-        for y in range(grid_h):
-            for x in range(grid_w):
-                if visited[y, x] or temp_grid[y, x] == TileType.OBSTACLE:
-                    continue
-                if temp_grid[y, x] not in [TileType.EMPTY, TileType.FOOD, TileType.FOOD_SOURCE, TileType.DOOR_OPEN, TileType.BUTTON, TileType.BUTTON_BROKEN]:
-                    continue
-                region = []
-                stack = [(y, x)]
-                visited[y, x] = True
-                while stack:
-                    cy, cx = stack.pop()
-                    region.append((cy, cx))
-                    for dy, dx in directions:
-                        ny, nx = cy + dy, cx + dx
-                        if not (0 <= ny < grid_h and 0 <= nx < grid_w):
-                            continue
-                        if visited[ny, nx] or temp_grid[ny, nx] == TileType.OBSTACLE:
-                            continue
-                        if temp_grid[ny, nx] in [TileType.EMPTY, TileType.FOOD, TileType.FOOD_SOURCE, TileType.DOOR_OPEN, TileType.BUTTON, TileType.BUTTON_BROKEN]:
-                            visited[ny, nx] = True
-                            stack.append((ny, nx))
-                if region:
-                    regions.append(region)
+
+
+
+    def _find_regions_separated_by_door(
+        self,
+        door_y: int,
+        door_x: int,
+        grid_to_use: np.ndarray,
+    ) -> List[List[Tuple[int, int]]]:
+        """
+        Optimized, semantics-identical version:
+        - Door cell is treated as OBSTACLE
+        - Finds ALL connected components of passable tiles
+        - Uses reusable buffers and numba labeling
+        """
+
+        h, w = self.grid_size, self.grid_size
+        pass_mask = self._passable_mask
+        labels = self._labels
+
+        # Build passable mask (same semantics as original)
+        pass_mask[:] = 0
+        pass_mask[(grid_to_use == TileType.EMPTY)] = 1
+        pass_mask[(grid_to_use == TileType.FOOD)] = 1
+        pass_mask[(grid_to_use == TileType.FOOD_SOURCE)] = 1
+        pass_mask[(grid_to_use == TileType.DOOR_OPEN)] = 1
+        pass_mask[(grid_to_use == TileType.BUTTON)] = 1
+        pass_mask[(grid_to_use == TileType.BUTTON_BROKEN)] = 1
+
+        # Door is closed
+        pass_mask[door_y, door_x] = 0
+
+        # Label components (numba, in-place)
+        nlabels = _label_components_numba_inplace(pass_mask, labels)
+
+        # --- Fast path option (metadata only) ---
+        # If later logic only needs counts / sizes, stop here.
+        # Example:
+        # sizes = np.zeros(nlabels, dtype=np.int32)
+        # for y in range(h):
+        #     for x in range(w):
+        #         lab = labels[y, x]
+        #         if lab > 0:
+        #             sizes[lab - 1] += 1
+        # return sizes
+
+        # --- Full region materialization (single scan) ---
+        regions: List[List[Tuple[int, int]]] = [[] for _ in range(nlabels)]
+
+        for y in range(h):
+            for x in range(w):
+                lab = labels[y, x]
+                if lab > 0:
+                    regions[lab - 1].append((y, x))
+
         return regions
+
+
 
     def _bfs_distance(self, start_y: int, start_x: int, target_y: int, target_x: int, grid_override: Optional[np.ndarray] = None) -> int:
         """Calculate actual shortest path distance using BFS"""
@@ -637,9 +820,75 @@ class GridMazeWorld(gym.Env):
                 candidates.append((int(y), int(x)))
         return candidates
 
-    # ---------------- Door and button placement logic ------------------
+    # ---------------------- Passable mask helpers -------------------------
+    def _update_passable_mask(self) -> None:
+        """
+        Maintain a boolean (uint8) mask of cells considered passable by pathfinding
+        and BFS routines. Call this after any change to self.grid that affects
+        passability (doors opening/closing, placing buttons/food, placing obstacles).
+        """
+        g = self.grid
+        mask = np.zeros_like(g, dtype=np.uint8)
+        mask[np.where((g == TileType.EMPTY) |
+                      (g == TileType.FOOD) |
+                      (g == TileType.FOOD_SOURCE) |
+                      (g == TileType.BUTTON) |
+                      (g == TileType.BUTTON_BROKEN) |
+                      (g == TileType.DOOR_OPEN))] = 1
+        self._passable_mask = mask
+
+    def _bfs_distance_using_mask(self, start_y: int, start_x: int,
+                                 target_y: int, target_x: int,
+                                 grid_override: Optional[np.ndarray] = None) -> int:
+        """
+        Wrapper that uses the precomputed passable mask to return the distance
+        between start and target (4-neighbour). If unreachable, returns large value.
+
+        This performs a standard BFS but uses fast numpy mask lookups to check
+        passability.
+        """
+        grid = grid_override if grid_override is not None else self.grid
+        h, w = grid.shape
+
+        if start_y == target_y and start_x == target_x:
+            return 0
+
+        if self._passable_mask is None:
+            self._update_passable_mask()
+
+        # quick rejection using precomputed passable mask
+        if self._passable_mask[target_y, target_x] == 0:
+            return float('inf')
+
+        visited = np.zeros((h, w), dtype=np.uint8)
+        q = deque()
+        q.append((start_y, start_x, 0))
+        visited[start_y, start_x] = 1
+        while q:
+            y, x, d = q.popleft()
+            for dy, dx in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                ny, nx = y + dy, x + dx
+                if not (0 <= ny < h and 0 <= nx < w):
+                    continue
+                if visited[ny, nx]:
+                    continue
+                if self._passable_mask[ny, nx] == 0:
+                    continue
+                if ny == target_y and nx == target_x:
+                    return d + 1
+                visited[ny, nx] = 1
+                q.append((ny, nx, d + 1))
+        return float('inf')
+
+    # ---------------- Door & button placement (optimized) ------------------
     def _can_place_door_with_buttons(self, y: int, x: int, grid_to_use: np.ndarray) -> Tuple[bool, List[Tuple[int, int]]]:
-        """Check if a door can be placed at (y, x) with proper button placement."""
+        """
+        Optimized version of _can_place_door_with_buttons which:
+          - reuses a single numba BFS per region (via bfs_reachable_mask) to get reachable empty
+            cells within the time limit, instead of calling _bfs_distance for every
+            candidate cell.
+          - uses precomputed passable mask for fast passability checks.
+        """
         if grid_to_use[y, x] != TileType.EMPTY:
             if self.debug:
                 print(f"  Door candidate ({y},{x}): grid cell is not empty")
@@ -656,21 +905,45 @@ class GridMazeWorld(gym.Env):
                 print(f"  Door candidate ({y},{x}): requires {required_buttons} buttons but n_buttons_per_door={self.n_buttons_per_door}")
             return False, []
 
-        button_positions = []
+        button_positions: List[Tuple[int, int]] = []
+        h, w = grid_to_use.shape
+        max_dist = max(0, self.door_open_duration - 2)
+
+        # Ensure passable mask is up-to-date for this grid
+        if grid_to_use is self.grid:
+            if self._passable_mask is None:
+                self._update_passable_mask()
+            pass_mask = self._passable_mask
+        else:
+            pm = np.zeros_like(grid_to_use, dtype=np.uint8)
+            pm[np.where((grid_to_use == TileType.EMPTY) |
+                        (grid_to_use == TileType.FOOD) |
+                        (grid_to_use == TileType.FOOD_SOURCE) |
+                        (grid_to_use == TileType.BUTTON) |
+                        (grid_to_use == TileType.BUTTON_BROKEN) |
+                        (grid_to_use == TileType.DOOR_OPEN))] = 1
+            pass_mask = pm
+
         for i, region in enumerate(regions):
+            # Run one BFS from the door location to find all reachable cells within max_dist
+            reachable = bfs_reachable_mask(pass_mask, h, w, y, x, max_dist)
+
+            # Collect candidate empty cells in this region that are reachable
             candidate_positions = []
-            for ry, rx in region:
-                if grid_to_use[ry, rx] == TileType.EMPTY:
-                    distance = self._bfs_distance(y, x, ry, rx, grid_to_use)
-                    if distance <= self.door_open_duration - 2:
-                        candidate_positions.append((ry, rx, distance))
+            for (ry, rx) in region:
+                if grid_to_use[ry, rx] == TileType.EMPTY and reachable[ry, rx] == 1:
+                    candidate_positions.append((ry, rx))
+
             if not candidate_positions:
                 if self.debug:
                     print(f"  Door candidate ({y},{x}): region {i} (size {len(region)}) has no empty cell within {self.door_open_duration} steps")
                 return False, []
+
+            # choose a random candidate — this preserves your previous behavior (random choice per region)
             idx = np.random.randint(0, len(candidate_positions))
-            by, bx, dist = candidate_positions[idx]
+            by, bx = candidate_positions[idx]
             button_positions.append((by, bx))
+
         if self.debug:
             print(f"  Door candidate ({y},{x}): SUCCESS, button positions = {button_positions}")
         return True, button_positions
@@ -764,6 +1037,9 @@ class GridMazeWorld(gym.Env):
                     print(f"Could not place any door in round {attempts}")
                 break
 
+        # After modifying grid with doors/buttons, update passable mask
+        self._update_passable_mask()
+
         if self.debug:
             print(f"Placed {placed_doors} doors and {len(self.buttons)} buttons total.")
 
@@ -783,6 +1059,8 @@ class GridMazeWorld(gym.Env):
         self._init_doors_and_buttons()
         self.food_positions_cache = np.zeros((self.grid_size, self.grid_size), dtype=np.int8)
         self._update_food_cache()
+        # Ensure passable mask is initialized
+        self._update_passable_mask()
         empty_cells = np.argwhere(self.grid == TileType.EMPTY)
         if len(empty_cells) == 0:
             empty_cells = np.argwhere(self.grid != TileType.OBSTACLE)
@@ -828,6 +1106,8 @@ class GridMazeWorld(gym.Env):
             else:
                 self.grid[door.y, door.x] = TileType.DOOR_CLOSED
                 self.door_open_array[door.y, door.x] = 0
+        # After doors change, update passable mask
+        self._update_passable_mask()
 
     def _check_button_press(self, button_y: int, button_x: int) -> bool:
         for button in self.buttons:
@@ -841,11 +1121,17 @@ class GridMazeWorld(gym.Env):
                     other_buttons_working = any(b for b in self.buttons if b.door_idx == button.door_idx and not b.is_broken)
                     if not other_buttons_working:
                         door.can_be_opened = False
+                    # passable mask changed (button became broken -> tile type may be considered same passable class,
+                    # but if you treat BUTTON_BROKEN differently adjust _update_passable_mask call placement)
+                    self._update_passable_mask()
                     return False
                 if success and 0 <= button.door_idx < len(self.doors):
                     door = self.doors[button.door_idx]
                     if door.open():
                         self.door_open_array[door.y, door.x] = 1
+                        # door changed -> update grid / mask
+                        self.grid[door.y, door.x] = TileType.DOOR_OPEN
+                        self._update_passable_mask()
                         return True
                 break
         return False
