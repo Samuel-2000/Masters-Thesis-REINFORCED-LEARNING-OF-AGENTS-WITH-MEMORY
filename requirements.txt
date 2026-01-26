@@ -1,6 +1,6 @@
 # requirements.txt
 torch>=2.0.0
-numpy<2.0
+numpy
 gymnasium>=0.29.0
 opencv-python>=4.7.0
 matplotlib>=3.7.0
