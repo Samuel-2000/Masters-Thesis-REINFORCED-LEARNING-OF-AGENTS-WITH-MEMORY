@@ -1,16 +1,4 @@
-"""
-FINAL — GridMazeWorld — Optimized template matcher with 12 templates
-
-This file implements the optimized template matching with ONLY the original 12 templates.
-- Ternary decision tree with entropy-based splitting
-- Bitmask optimization for leaf checking
-- Early termination optimizations
-- Memory-efficient data structures
-- Caching-friendly layout
-
-It is intended as a drop-in replacement for previous GridMazeWorld implementations.
-"""
-
+# environment.py — GridMazeWorld with optimized template matching (vectorized masks + tree)
 import numpy as np
 import cv2
 import gymnasium as gym
@@ -21,6 +9,7 @@ from dataclasses import dataclass
 from collections import deque
 import math
 
+# Import your project's constants; adjust path as needed
 from .constants import (
     ObservationTokens, OBSERVATION_SIZE, NEIGHBOR_POSITIONS,
     ACTION_TOKEN_POSITION, ENERGY_TOKEN_POSITION, VOCAB_SIZE,
@@ -32,7 +21,6 @@ from .constants import (
     DEFAULT_ENERGY_DECAY, DEFAULT_ENERGY_PER_STEP,
     action_to_token, grid_tile_to_observation_token
 )
-
 
 # --------------------- Data classes ----------------------------------
 @dataclass
@@ -90,197 +78,193 @@ class Button:
         return False
 
 
-# ------------------ ULTRA-OPTIMIZED Template Decision Tree -----------
-class _OptimizedTreeNode:
-    __slots__ = ('cell_idx', 'pass_child', 'obs_child', 'template_indices')
+# ------------------ Template tree node & matcher -----------------------
+class TemplateNode:
+    __slots__ = ('split_pos', 'pass_child', 'obs_child', 'templates', 'is_leaf')
 
-    def __init__(self, cell_idx: int = -1):
-        self.cell_idx = cell_idx
+    def __init__(self, split_pos: int = -1, is_leaf: bool = False):
+        self.split_pos = split_pos
         self.pass_child = None
         self.obs_child = None
-        self.template_indices = None
+        self.templates: List[int] = []
+        self.is_leaf = is_leaf
 
 
-class OptimizedTemplateDecisionTree:
-    """Even faster template matching with compact nodes and early exits.
-
-    Build once from a small set of templates (12) and then call matches_any_template(grid, y, x).
+class FastTemplateMatcher:
+    """
+    Template matcher that:
+      - Holds obstacle/passable bitmasks for templates
+      - Contains a compact decision tree (TemplateNode)
+      - Provides a vectorized compute_all_neighborhood_masks(grid) function
+      - matches(grid, y, x, neighborhood_mask=None) performs very fast checks
     """
 
-    def __init__(self, templates: List[np.ndarray], max_depth: int = 4):
-        self.templates = [np.asarray(t, dtype=np.int8).reshape(9) for t in templates]
-        self.n_templates = len(self.templates)
-        self.max_depth = max_depth
+    # Precomputed offsets in flattened 3x3 order (row-major)
+    _OFFSETS = [(-1, -1), (-1, 0), (-1, 1),
+                (0, -1), (0, 0), (0, 1),
+                (1, -1), (1, 0), (1, 1)]
+    _CENTER_IDX = 4
 
-        # Precompute flattened templates and per-template care-lists & masks
-        self._flat_templates = np.array(self.templates, dtype=np.int8).reshape(self.n_templates, 9)
-        self._obstacle_masks = np.zeros(self.n_templates, dtype=np.uint16)
-        self._pass_masks = np.zeros(self.n_templates, dtype=np.uint16)
-        self._cares = [None] * self.n_templates
+    def __init__(self, templates_flat: List[np.ndarray], max_depth: int = 4):
+        """
+        templates_flat: list of 9-element arrays with values in {-1,0,1}
+        """
+        self.templates_flat = [np.array(t, dtype=np.int8).reshape(9,) for t in templates_flat]
+        self.n_templates = len(self.templates_flat)
+        self.template_array = np.stack(self.templates_flat, axis=0) if self.n_templates > 0 else np.zeros((0, 9), dtype=np.int8)
 
+        # Precompute bitmasks
+        self.obstacle_masks = np.zeros(self.n_templates, dtype=np.uint16)
+        self.passable_masks = np.zeros(self.n_templates, dtype=np.uint16)
         for i in range(self.n_templates):
-            om = 0
-            pm = 0
-            cares = []
-            for k in range(9):
-                v = int(self._flat_templates[i, k])
+            obs = 0
+            pas = 0
+            flat = self.template_array[i]
+            for j in range(9):
+                v = int(flat[j])
                 if v == 1:
-                    om |= (1 << k)
-                    cares.append(k)
+                    obs |= (1 << j)
                 elif v == 0:
-                    pm |= (1 << k)
-                    cares.append(k)
-            self._obstacle_masks[i] = om
-            self._pass_masks[i] = pm
-            self._cares[i] = cares
+                    pas |= (1 << j)
+            self.obstacle_masks[i] = obs
+            self.passable_masks[i] = pas
 
-        # Precompute mapping from cell index to (dy,dx)
-        self._cell_to_offset = [(dy, dx) for dy in (-1, 0, 1) for dx in (-1, 0, 1)]
+        # Build entropy-based decision tree
+        self.root = self._build_tree(list(range(self.n_templates)), depth=0, max_depth=max_depth)
 
-        # Build tree
-        self.root = self._build_tree(set(range(self.n_templates)), depth=0)
+    # ---------------- Vectorized neighborhood masks ------------------
+    def compute_all_neighborhood_masks(self, grid: np.ndarray) -> np.ndarray:
+        """
+        Compute 9-bit mask per cell where bit==1 indicates obstacle-like (Obstacle or Door).
+        Out-of-bounds are treated as obstacle (bit set).
+        Returns array shape (H, W) dtype uint16.
+        """
+        H, W = grid.shape
+        obstacle_bool = ((grid == TileType.OBSTACLE) |
+                         (grid == TileType.DOOR_CLOSED) |
+                         (grid == TileType.DOOR_OPEN))
+        # pad with True so out-of-bounds are treated as obstacles
+        p = np.pad(obstacle_bool.astype(np.uint8), pad_width=1, constant_values=1)
+        masks = np.zeros((H, W), dtype=np.uint16)
 
-    def _entropy(self, indices: Set[int], pos: int) -> float:
-        if pos == 4:
-            return -1.0
-        counts = { -1: 0, 0: 0, 1: 0 }
-        for i in indices:
-            v = int(self._flat_templates[i, pos])
-            counts[v] += 1
+        for bit, (dy, dx) in enumerate(self._OFFSETS):
+            sub = p[1 + dy: 1 + dy + H, 1 + dx: 1 + dx + W].astype(np.uint16)
+            masks |= (sub << bit)
+        return masks
+
+    # ---------------- Fallback single mask ----------------------------
+    def _neighborhood_mask(self, grid: np.ndarray, y: int, x: int) -> int:
+        H, W = grid.shape
+        mask = 0
+        for bit, (dy, dx) in enumerate(self._OFFSETS):
+            ny, nx = y + dy, x + dx
+            if not (0 <= ny < H and 0 <= nx < W):
+                mask |= (1 << bit)
+            else:
+                t = grid[ny, nx]
+                if t == TileType.OBSTACLE or t == TileType.DOOR_CLOSED or t == TileType.DOOR_OPEN:
+                    mask |= (1 << bit)
+        return mask
+
+    # ---------------- Tree builder (entropy-based) --------------------
+    def _entropy_score(self, indices: List[int], pos: int) -> float:
+        counts = np.zeros(3, dtype=np.int32)  # -1,0,1 -> idx 0,1,2
+        for idx in indices:
+            val = int(self.template_array[idx, pos]) + 1
+            counts[val] += 1
         total = len(indices)
         if total <= 1:
             return 0.0
-        ent = 0.0
-        for k in (-1, 0, 1):
-            c = counts[k]
+        entropy = 0.0
+        for c in counts:
             if c > 0:
                 p = c / total
-                ent -= p * math.log2(p)
-        return ent
+                entropy -= p * math.log2(p)
+        return entropy
 
-    def _build_tree(self, indices: Set[int], depth: int) -> _OptimizedTreeNode:
-        node = _OptimizedTreeNode()
-        if len(indices) <= 2 or depth >= self.max_depth:
-            node.cell_idx = -1
-            node.template_indices = list(indices)
-            return node
+    def _build_tree(self, indices: List[int], depth: int, max_depth: int) -> TemplateNode:
+        # Base cases
+        if len(indices) <= 2 or depth >= max_depth:
+            leaf = TemplateNode(is_leaf=True)
+            leaf.templates = indices.copy()
+            return leaf
 
-        best_cell = -1
-        best_score = -1.0
-        for cell in range(9):
-            if cell == 4:
+        # choose best split pos (exclude center)
+        best_pos = -1
+        best_entropy = -1.0
+        for pos in range(9):
+            if pos == self._CENTER_IDX:
                 continue
-            score = self._entropy(indices, cell)
-            if score > best_score:
-                best_score = score
-                best_cell = cell
+            entropy = self._entropy_score(indices, pos)
+            if entropy > best_entropy:
+                best_entropy = entropy
+                best_pos = pos
 
-        if best_cell == -1 or best_score < 0.05:
-            node.cell_idx = -1
-            node.template_indices = list(indices)
-            return node
+        if best_pos == -1 or best_entropy < 0.08:
+            leaf = TemplateNode(is_leaf=True)
+            leaf.templates = indices.copy()
+            return leaf
 
-        # split into passable/obstacle groups
-        pass_set = set()
-        obs_set = set()
-        for i in indices:
-            v = int(self._flat_templates[i, best_cell])
-            if v == 1:
-                obs_set.add(i)
-            elif v == 0:
-                pass_set.add(i)
-            else:  # -1 -> belongs to both
-                pass_set.add(i)
-                obs_set.add(i)
+        pass_indices: List[int] = []
+        obs_indices: List[int] = []
+        for idx in indices:
+            v = int(self.template_array[idx, best_pos])
+            if v == 0 or v == -1:
+                pass_indices.append(idx)
+            if v == 1 or v == -1:
+                obs_indices.append(idx)
 
-        # if split does not reduce, make leaf
-        if pass_set == indices and obs_set == indices:
-            node.cell_idx = -1
-            node.template_indices = list(indices)
-            return node
+        # if split doesn't reduce, make leaf
+        if len(pass_indices) == len(indices) and len(obs_indices) == len(indices):
+            leaf = TemplateNode(is_leaf=True)
+            leaf.templates = indices.copy()
+            return leaf
 
-        node.cell_idx = best_cell
-        node.pass_child = self._build_tree(pass_set, depth + 1) if pass_set else None
-        node.obs_child = self._build_tree(obs_set, depth + 1) if obs_set else None
+        node = TemplateNode(is_leaf=False)
+        node.split_pos = best_pos
+        node.pass_child = self._build_tree(pass_indices, depth + 1, max_depth) if pass_indices else None
+        node.obs_child = self._build_tree(obs_indices, depth + 1, max_depth) if obs_indices else None
         return node
 
-    def _neighborhood_bitmask(self, grid: np.ndarray, y: int, x: int) -> int:
-        H, W = grid.shape
-        mask = 0
-        k = 0
-        for dy in (-1, 0, 1):
-            for dx in (-1, 0, 1):
-                ny, nx = y + dy, x + dx
-                bit = 0
-                if not (0 <= ny < H and 0 <= nx < W):
-                    bit = 1
-                else:
-                    cell = grid[ny, nx]
-                    # treat any door or obstacle as obstacle for matching
-                    if cell == TileType.OBSTACLE or cell == TileType.DOOR_CLOSED or cell == TileType.DOOR_OPEN:
-                        bit = 1
-                    else:
-                        bit = 0
-                mask |= (bit << k)
-                k += 1
-        return mask
-
-    def matches_any_template(self, grid_state: np.ndarray, y: int, x: int) -> bool:
-        H, W = grid_state.shape
-        if not (0 <= y < H and 0 <= x < W):
+    # ---------------- Matching ---------------------------------------
+    def matches(self, grid: np.ndarray, y: int, x: int, neighborhood_mask: Optional[int] = None) -> bool:
+        """
+        Check if any template matches at (y,x).
+        If neighborhood_mask provided (uint9 mask), uses it to avoid recomputing neighborhood.
+        """
+        if grid[y, x] != TileType.EMPTY:
             return False
-        if grid_state[y, x] != TileType.EMPTY:
+
+        if neighborhood_mask is None:
+            neighborhood_mask = self._neighborhood_mask(grid, y, x)
+
+        # center must be passable
+        if ((neighborhood_mask >> self._CENTER_IDX) & 1) != 0:
             return False
 
         node = self.root
-        # walk tree quickly
-        while node.cell_idx != -1:
-            cell = node.cell_idx
-            dy, dx = self._cell_to_offset[cell]
-            ny, nx = y + dy, x + dx
-            is_pass = False
-            if 0 <= ny < H and 0 <= nx < W:
-                c = grid_state[ny, nx]
-                is_pass = not (c == TileType.OBSTACLE or c == TileType.DOOR_CLOSED or c == TileType.DOOR_OPEN)
+        # traverse using mask bits
+        while node is not None and not node.is_leaf:
+            bit = (neighborhood_mask >> node.split_pos) & 1
+            if bit:
+                node = node.obs_child
             else:
-                is_pass = False
-            node = node.pass_child if is_pass else node.obs_child
+                node = node.pass_child
             if node is None:
-                return False
+                break
 
-        # In leaf: check templates using precomputed cares and early exits
-        nb_mask = self._neighborhood_bitmask(grid_state, y, x)
-        for ti in node.template_indices or []:
-            # obstacles required must be subset of nb_mask
-            if (nb_mask & int(self._obstacle_masks[ti])) != int(self._obstacle_masks[ti]):
+        if node is None:
+            return False
+
+        # Check candidates using bitmasks
+        for ti in node.templates:
+            req_obs = int(self.obstacle_masks[ti])
+            req_pass = int(self.passable_masks[ti])
+            if (neighborhood_mask & req_obs) != req_obs:
                 continue
-            # any required-passable that is occupied -> fail
-            if (nb_mask & int(self._pass_masks[ti])) != 0:
+            if (neighborhood_mask & req_pass) != 0:
                 continue
-            # final verification (handles out-of-bounds logic for passable requirements)
-            cares = self._cares[ti]
-            ok = True
-            for ci in cares:
-                if ci == 4:
-                    continue
-                dy, dx = self._cell_to_offset[ci]
-                ny, nx = y + dy, x + dx
-                val = int(self._flat_templates[ti, ci])
-                if not (0 <= ny < H and 0 <= nx < W):
-                    if val == 0:
-                        ok = False
-                        break
-                    else:
-                        continue
-                cell = grid_state[ny, nx]
-                if val == 1 and cell != TileType.OBSTACLE:
-                    ok = False
-                    break
-                if val == 0 and cell == TileType.OBSTACLE:
-                    ok = False
-                    break
-            if ok:
-                return True
+            return True
         return False
 
 
@@ -432,7 +416,7 @@ def get_observation_optimized(y: int, x: int, grid: np.ndarray, food_sources: np
     return obs
 
 
-# ------------------------- OPTIMIZED GridMazeWorld -------------------------------
+# ------------------------- GridMazeWorld -------------------------------
 class GridMazeWorld(gym.Env):
     def __init__(self, grid_size: int = DEFAULT_GRID_SIZE, max_steps: int = DEFAULT_MAX_STEPS,
                  obstacle_fraction: float = DEFAULT_OBSTACLE_FRACTION, n_food_sources: int = DEFAULT_FOOD_SOURCES,
@@ -475,14 +459,14 @@ class GridMazeWorld(gym.Env):
         self.buttons: List[Button] = []
         self.colors = TILE_COLORS
         self.debug = False
-        
-        # Initialize template system - ONLY 12 templates
-        self._init_templates()
-        self.template_tree = OptimizedTemplateDecisionTree(self.templates)
-        
-        # Precompute offsets for door proximity checking
-        self._door_proximity_offsets = [(-1, -1), (-1, 0), (-1, 1), (0, -1), 
-                                        (0, 1), (1, -1), (1, 0), (1, 1)]
+
+        # Create optimized template matcher using 16 templates
+        templates_flat = self._templates_flat_list()
+        self.template_matcher = FastTemplateMatcher(templates_flat, max_depth=4)
+
+        # Precompute door proximity offsets
+        self._door_check_offsets = [(-1, -1), (-1, 0), (-1, 1), (0, -1),
+                                    (0, 1), (1, -1), (1, 0), (1, 1)]
 
     def _adjust_parameters_by_task_class(self):
         if self.task_class == TaskClass.BASIC:
@@ -513,69 +497,46 @@ class GridMazeWorld(gym.Env):
                 self.button_break_probability = self.complexity_level * 0.3
             self.door_periodic = True
 
-    def _init_templates(self):
-        """Define the ORIGINAL 12 templates only (not the extra 4)."""
-        templates = [
-            # T_vert
-            np.array([[-1,  0, -1],
-                      [ 1,  0,  1],
-                      [-1,  0, -1]], dtype=np.int8),
-            # T_horiz
-            np.array([[-1,  1, -1],
-                      [ 0,  0,  0],
-                      [-1,  1, -1]], dtype=np.int8),
-            # T_diag1
-            np.array([[-1,  0,  1],
-                      [ 0,  0,  0],
-                      [ 1,  0, -1]], dtype=np.int8),
-            # T_diag2
-            np.array([[ 1,  0, -1],
-                      [ 0,  0,  0],
-                      [-1,  0,  1]], dtype=np.int8),
-            # T_a
-            np.array([[-1,  1, -1],
-                      [ 0,  0, -1],
-                      [ 1,  0, -1]], dtype=np.int8),
-            # T_b
-            np.array([[-1, -1, -1],
-                      [ 0,  0,  1],
-                      [ 1,  0, -1]], dtype=np.int8),
-            # T_c
-            np.array([[-1,  0,  1],
-                      [ 1,  0,  0],
-                      [-1, -1, -1]], dtype=np.int8),
-            # T_d
-            np.array([[-1,  0,  1],
-                      [-1,  0,  0],
-                      [-1,  1, -1]], dtype=np.int8),
-            # T_e
-            np.array([[-1,  1, -1],
-                      [-1,  0,  0],
-                      [-1,  0,  1]], dtype=np.int8),
-            # T_f
-            np.array([[-1, -1, -1],
-                      [ 1,  0,  0],
-                      [-1,  0,  1]], dtype=np.int8),
-            # T_g
-            np.array([[ 1,  0, -1],
-                      [ 0,  0, -1],
-                      [-1,  1, -1]], dtype=np.int8),
-            # T_h
-            np.array([[ 1,  0, -1],
-                      [ 0,  0,  1],
-                      [-1, -1, -1]], dtype=np.int8),
+    # ---------------- Templates ------------------------------------------
+    def _templates_flat_list(self) -> List[np.ndarray]:
+        """Return list of 9-element flattened templates (values -1/0/1)."""
+        templates_3x3 = [
+            np.array([[-1,  0, -1], [ 1,  0,  1], [-1,  0, -1]], dtype=np.int8),  # vertical
+            np.array([[-1,  1, -1], [ 0,  0,  0], [-1,  1, -1]], dtype=np.int8),  # horizontal
+            np.array([[-1,  0,  1], [ 0,  0,  0], [ 1,  0, -1]], dtype=np.int8),
+            np.array([[ 1,  0, -1], [ 0,  0,  0], [-1,  0,  1]], dtype=np.int8),
+            np.array([[-1,  1, -1], [ 0,  0, -1], [ 1,  0, -1]], dtype=np.int8),
+            np.array([[-1, -1, -1], [ 0,  0,  1], [ 1,  0, -1]], dtype=np.int8),
+            np.array([[-1,  0,  1], [ 1,  0,  0], [-1, -1, -1]], dtype=np.int8),
+            np.array([[-1,  0,  1], [-1,  0,  0], [-1,  1, -1]], dtype=np.int8),
+            np.array([[-1,  1, -1], [-1,  0,  0], [-1,  0,  1]], dtype=np.int8),
+            np.array([[-1, -1, -1], [ 1,  0,  0], [-1,  0,  1]], dtype=np.int8),
+            np.array([[ 1,  0, -1], [ 0,  0, -1], [-1,  1, -1]], dtype=np.int8),
+            np.array([[ 1,  0, -1], [ 0,  0,  1], [-1, -1, -1]], dtype=np.int8),
+            np.array([[ 1,  0, -1], [ 0,  0,  0], [-1,  0,  1]], dtype=np.int8),
+            np.array([[-1,  0,  1], [ 0,  0,  0], [ 1,  0, -1]], dtype=np.int8),
+            np.array([[-1,  0, -1], [ 1,  0,  0], [-1,  0,  1]], dtype=np.int8),
+            np.array([[ 1,  0, -1], [ 0,  0,  1], [-1,  0, -1]], dtype=np.int8),
         ]
-        self.templates = templates
+        # flatten row-major
+        return [t.flatten() for t in templates_3x3]
 
     # ------------------ Helper utilities ---------------------------------
+    def _get_temp_grid_with_periodic_doors_open(self) -> np.ndarray:
+        temp = self.grid.copy()
+        for d in self.doors:
+            if not d.requires_button:
+                temp[d.y, d.x] = TileType.DOOR_OPEN
+        return temp
+
     def _is_passable(self, tile_type: int) -> bool:
-        return tile_type in [TileType.EMPTY, TileType.FOOD, TileType.FOOD_SOURCE, 
-                               TileType.BUTTON, TileType.BUTTON_BROKEN, TileType.DOOR_OPEN]
+        return tile_type in [TileType.EMPTY, TileType.FOOD, TileType.FOOD_SOURCE, TileType.BUTTON, TileType.BUTTON_BROKEN, TileType.DOOR_OPEN]
 
     def _manhattan_distance(self, a_y: int, a_x: int, b_y: int, b_x: int) -> int:
         return abs(a_y - b_y) + abs(a_x - b_x)
 
     def _find_regions_separated_by_door(self, door_y: int, door_x: int, grid_to_use: np.ndarray) -> List[List[Tuple[int, int]]]:
+        """Find all regions (connected components) that would be separated if this door were closed."""
         temp_grid = grid_to_use.copy()
         temp_grid[door_y, door_x] = TileType.OBSTACLE
         grid_h, grid_w = self.grid_size, self.grid_size
@@ -607,65 +568,96 @@ class GridMazeWorld(gym.Env):
                     regions.append(region)
         return regions
 
-    def _bfs_distance(self, start_y: int, start_x: int, target_y: int, target_x: int, 
-                      grid_override: Optional[np.ndarray] = None) -> int:
+    def _bfs_distance(self, start_y: int, start_x: int, target_y: int, target_x: int, grid_override: Optional[np.ndarray] = None) -> int:
+        """Calculate actual shortest path distance using BFS"""
         grid = grid_override if grid_override is not None else self.grid
         h, w = grid.shape
+
         if start_y == target_y and start_x == target_x:
             return 0
+
         visited = np.zeros((h, w), dtype=bool)
         queue = deque()
         queue.append((start_y, start_x, 0))
         visited[start_y, start_x] = True
+
         directions = [(-1, 0), (1, 0), (0, -1), (0, 1)]
+
         while queue:
             y, x, dist = queue.popleft()
+
             for dy, dx in directions:
                 ny, nx = y + dy, x + dx
+
                 if not (0 <= ny < h and 0 <= nx < w):
                     continue
                 if visited[ny, nx]:
                     continue
+
+                # Check if cell is passable
                 tile = grid[ny, nx]
                 if not self._is_passable(tile):
                     continue
+
                 if ny == target_y and nx == target_x:
                     return dist + 1
+
                 visited[ny, nx] = True
                 queue.append((ny, nx, dist + 1))
-        return float('inf')
 
-    # ---------------- Ultra-fast door candidate scanning ------------------
+        return float('inf')  # Unreachable
+
+    # ---------------- Door candidate scanning (vectorized) ------------------
     def _find_door_candidates_with_templates(self, grid_to_use: np.ndarray) -> List[Tuple[int, int]]:
-        candidates = []
+        """Find potential door positions using optimized template matching (vectorized masks)."""
         H, W = self.grid_size, self.grid_size
-        for y in range(1, H - 1):
-            for x in range(1, W - 1):
-                if grid_to_use[y, x] != TileType.EMPTY:
+
+        # 1) Compute all neighborhood masks (vectorized)
+        masks = self.template_matcher.compute_all_neighborhood_masks(grid_to_use)
+
+        # 2) Precompute near-existing-door boolean (vectorized)
+        door_bool = ((grid_to_use == TileType.DOOR_OPEN) | (grid_to_use == TileType.DOOR_CLOSED)).astype(np.uint8)
+        pdoor = np.pad(door_bool, pad_width=1, constant_values=0)
+        near_door = np.zeros((H, W), dtype=bool)
+        for dy in (-1, 0, 1):
+            for dx in (-1, 0, 1):
+                if dy == 0 and dx == 0:
                     continue
-                near_existing_door = False
-                for dy, dx in self._door_proximity_offsets:
-                    ny, nx = y + dy, x + dx
-                    if 0 <= ny < H and 0 <= nx < W:
-                        if grid_to_use[ny, nx] in (TileType.DOOR_OPEN, TileType.DOOR_CLOSED):
-                            near_existing_door = True
-                            break
-                if near_existing_door:
-                    continue
-                if self.template_tree.matches_any_template(grid_to_use, y, x):
-                    candidates.append((y, x))
+                near_door |= pdoor[1 + dy:1 + dy + H, 1 + dx:1 + dx + W].astype(bool)
+
+        # 3) Candidate centers are empty cells AND not near door
+        ys, xs = np.where((grid_to_use == TileType.EMPTY) & (~near_door))
+        candidates: List[Tuple[int, int]] = []
+        for y, x in zip(ys, xs):
+            m = int(masks[y, x])  # uint16 -> int
+            # double-check center bit is clear
+            if ((m >> 4) & 1) != 0:
+                continue
+            if self.template_matcher.matches(grid_to_use, y, x, neighborhood_mask=m):
+                candidates.append((int(y), int(x)))
         return candidates
 
-    # ---------------- Door/button placement logic (unchanged) -------------
+    # ---------------- Door and button placement logic ------------------
     def _can_place_door_with_buttons(self, y: int, x: int, grid_to_use: np.ndarray) -> Tuple[bool, List[Tuple[int, int]]]:
+        """Check if a door can be placed at (y, x) with proper button placement."""
         if grid_to_use[y, x] != TileType.EMPTY:
+            if self.debug:
+                print(f"  Door candidate ({y},{x}): grid cell is not empty")
             return False, []
+
         regions = self._find_regions_separated_by_door(y, x, grid_to_use)
+
+        if self.debug:
+            print(f"  Door candidate ({y},{x}): found {len(regions)} regions")
+
         required_buttons = len(regions)
         if self.n_buttons_per_door > 0 and required_buttons > self.n_buttons_per_door:
+            if self.debug:
+                print(f"  Door candidate ({y},{x}): requires {required_buttons} buttons but n_buttons_per_door={self.n_buttons_per_door}")
             return False, []
+
         button_positions = []
-        for region in regions:
+        for i, region in enumerate(regions):
             candidate_positions = []
             for ry, rx in region:
                 if grid_to_use[ry, rx] == TileType.EMPTY:
@@ -673,65 +665,109 @@ class GridMazeWorld(gym.Env):
                     if distance <= self.door_open_duration - 2:
                         candidate_positions.append((ry, rx, distance))
             if not candidate_positions:
+                if self.debug:
+                    print(f"  Door candidate ({y},{x}): region {i} (size {len(region)}) has no empty cell within {self.door_open_duration} steps")
                 return False, []
             idx = np.random.randint(0, len(candidate_positions))
-            by, bx, _ = candidate_positions[idx]
+            by, bx, dist = candidate_positions[idx]
             button_positions.append((by, bx))
+        if self.debug:
+            print(f"  Door candidate ({y},{x}): SUCCESS, button positions = {button_positions}")
         return True, button_positions
 
+    # ---------------- Main initialization of doors & buttons ----------------
     def _init_doors_and_buttons(self):
         self.doors = []
         self.buttons = []
+
         if self.n_doors == 0:
+            if self.debug:
+                print("No doors requested")
             return
+
         current_grid = self.grid.copy()
-        placed = 0
+        placed_doors = 0
         attempts = 0
         max_attempts = 50
-        while placed < self.n_doors and attempts < max_attempts:
+
+        while placed_doors < self.n_doors and attempts < max_attempts:
             attempts += 1
             candidates = self._find_door_candidates_with_templates(current_grid)
             if not candidates:
+                if self.debug:
+                    print("No door candidates found")
                 break
+
             np.random.shuffle(candidates)
-            placed_this_round = False
+            door_placed_this_round = False
+
             for y, x in candidates:
-                if any(self._manhattan_distance(y, x, d.y, d.x) < 3 for d in self.doors):
+                if placed_doors >= self.n_doors:
+                    break
+
+                too_close = any(self._manhattan_distance(y, x, d.y, d.x) < 3 for d in self.doors)
+                if too_close:
                     continue
+
+                # determine door type
                 requires_button = True
                 if self.task_class == TaskClass.DOORS:
                     requires_button = False
                 elif self.task_class == TaskClass.COMPLEX:
                     requires_button = np.random.random() < 0.5
+
                 if not requires_button:
-                    door = Door(y=y, x=x, open_duration=self.door_open_duration, close_duration=self.door_close_duration, requires_button=False, can_be_opened=True, is_choke_point=True)
+                    door = Door(y=y, x=x,
+                                open_duration=self.door_open_duration,
+                                close_duration=self.door_close_duration,
+                                requires_button=False,
+                                can_be_opened=True,
+                                is_choke_point=True)
                     door.is_open = np.random.random() < 0.5
+                    door_idx = len(self.doors)
                     self.doors.append(door)
                     self.grid[y, x] = TileType.DOOR_CLOSED
                     current_grid[y, x] = TileType.DOOR_CLOSED
                     self.door_open_array[y, x] = 1 if door.is_open else 0
-                    placed += 1
-                    placed_this_round = True
+                    placed_doors += 1
+                    door_placed_this_round = True
+                    if self.debug:
+                        print(f"Placed periodic door at ({y},{x})")
                     break
                 else:
-                    ok, bpos = self._can_place_door_with_buttons(y, x, current_grid)
-                    if ok:
-                        door = Door(y=y, x=x, open_duration=self.door_open_duration, close_duration=self.door_close_duration, requires_button=True, can_be_opened=True, is_choke_point=True)
+                    can_place, button_positions = self._can_place_door_with_buttons(y, x, current_grid)
+                    if can_place:
+                        door = Door(y=y, x=x,
+                                    open_duration=self.door_open_duration,
+                                    close_duration=self.door_close_duration,
+                                    requires_button=True,
+                                    can_be_opened=True,
+                                    is_choke_point=True)
+                        door_idx = len(self.doors)
                         self.doors.append(door)
                         self.grid[y, x] = TileType.DOOR_CLOSED
                         current_grid[y, x] = TileType.DOOR_CLOSED
-                        for by, bx in bpos:
-                            button = Button(y=by, x=bx, door_idx=len(self.doors)-1, break_probability=self.button_break_probability)
+                        self.door_open_array[y, x] = 0
+                        for by, bx in button_positions:
+                            button = Button(y=by, x=bx, door_idx=door_idx, break_probability=self.button_break_probability, is_broken=False)
                             self.buttons.append(button)
                             self.grid[by, bx] = TileType.BUTTON
                             current_grid[by, bx] = TileType.BUTTON
-                        placed += 1
-                        placed_this_round = True
+                        placed_doors += 1
+                        door_placed_this_round = True
+                        if self.debug:
+                            print(f"Placed button door at ({y},{x})")
                         break
-            if not placed_this_round:
+
+            if not door_placed_this_round:
+                if self.debug:
+                    print(f"Could not place any door in round {attempts}")
                 break
 
-    # ---------------- rest of env methods (reset/step/render/etc) --------
+        if self.debug:
+            print(f"Placed {placed_doors} doors and {len(self.buttons)} buttons total.")
+
+    # ---------------- rest of env (reset/step/render/etc) -----------------
     def reset(self, seed: Optional[int] = None, options: Optional[Dict] = None) -> Tuple[np.ndarray, Dict]:
         super().reset(seed=seed)
         if seed is not None:
@@ -757,6 +793,8 @@ class GridMazeWorld(gym.Env):
         self.last_action = ENV_ACTIONS_START
         info = {'energy': self.energy, 'steps': self.steps, 'position': self.agent_pos.copy(), 'task_class': self.task_class, 'complexity_level': self.complexity_level, 'n_doors': len(self.doors), 'n_buttons': len(self.buttons)}
         obs = self._get_observation()
+        if self.debug:
+            print(f"\nReset Environment:\n  Doors: {len(self.doors)}, Buttons: {len(self.buttons)}\n  Agent pos: {self.agent_pos}")
         return obs, info
 
     def _init_food_sources(self):
@@ -800,8 +838,7 @@ class GridMazeWorld(gym.Env):
                 if button.is_broken:
                     self.grid[button_y, button_x] = TileType.BUTTON_BROKEN
                     door = self.doors[button.door_idx]
-                    other_buttons_working = any(b for b in self.buttons 
-                                              if b.door_idx == button.door_idx and not b.is_broken)
+                    other_buttons_working = any(b for b in self.buttons if b.door_idx == button.door_idx and not b.is_broken)
                     if not other_buttons_working:
                         door.can_be_opened = False
                     return False
@@ -816,9 +853,7 @@ class GridMazeWorld(gym.Env):
     def _can_move_to(self, y: int, x: int) -> bool:
         if not (0 <= y < self.grid_size and 0 <= x < self.grid_size):
             return False
-        tile_type = self.grid[y, x]
-        return tile_type in [TileType.EMPTY, TileType.DOOR_OPEN, TileType.FOOD, 
-                           TileType.FOOD_SOURCE, TileType.BUTTON, TileType.BUTTON_BROKEN]
+        return self._is_passable(self.grid[y, x])
 
     def _get_adjacent_button_positions(self, y: int, x: int) -> List[Tuple[int, int]]:
         adjacent = []
@@ -833,12 +868,18 @@ class GridMazeWorld(gym.Env):
         if self.done:
             obs = self._get_observation()
             return obs, 0.0, True, True, {}
+
         if not (0 <= action < NUM_ACTIONS):
             raise ValueError(f"Invalid action: {action}. Must be 0-{NUM_ACTIONS-1}")
+
+        # Update door states first
         self._update_door_states()
+
+        # Handle different action types
         button_pressed = False
         moved = False
         y, x = self.agent_pos
+
         if action == Actions.BUTTON:
             adjacent_buttons = self._get_adjacent_button_positions(y, x)
             for by, bx in adjacent_buttons:
@@ -859,34 +900,50 @@ class GridMazeWorld(gym.Env):
             elif action == Actions.DOWN:
                 if y < self.grid_size-1 and self._can_move_to(y+1, x):
                     y += 1
+
         if moved:
             self.agent_pos = np.array([y, x])
+
+        # Process food if agent moved onto food
         energy_gained = 0.0
         if moved:
             energy_gained = food_step(y, x, self.food_sources, self.food_energy)
             if energy_gained > 0:
                 self.food_positions_cache[y, x] = 0
-        self.energy = (self.energy * self.energy_decay + 
-                      energy_gained - self.energy_per_step)
+
+        # Update energy
+        self.energy = (self.energy * self.energy_decay +
+                       energy_gained - self.energy_per_step)
         self.energy = max(0.0, min(self.energy, 100.0))
+
+        # Update state
         self.steps += 1
         self.last_action = action
+
+        # Check termination
         terminated = (self.steps >= self.max_steps or self.energy <= 0)
         truncated = False
         self.done = terminated or truncated
-        reward = 0.01
+
+        # Calculate reward
+        reward = 0.01  # Survival reward per step
         if energy_gained > 0:
-            reward += 1.0
+            reward += 1.0  # Food collection reward
         if action == Actions.BUTTON:
             if button_pressed:
-                reward += 0.5
+                reward += 0.5  # Successful button press reward
             else:
                 reward -= 0.1
+
         if self.energy < 10:
             reward -= 0.1
+
+        # Update food cache if food regenerated
         if self.steps % 2 == 0:
             self._update_food_cache()
+
         obs = self._get_observation()
+
         info = {
             'energy': self.energy,
             'steps': self.steps,
@@ -899,12 +956,13 @@ class GridMazeWorld(gym.Env):
             'n_doors_active': sum(1 for d in self.doors if d.can_be_opened),
             'n_buttons_working': sum(1 for b in self.buttons if not b.is_broken)
         }
+
         return obs, reward, terminated, truncated, info
 
     def _get_observation(self) -> np.ndarray:
         return get_observation_optimized(
-            int(self.agent_pos[0]), int(self.agent_pos[1]), 
-            self.grid, self.food_sources, self.last_action, 
+            int(self.agent_pos[0]), int(self.agent_pos[1]),
+            self.grid, self.food_sources, self.last_action,
             self.energy, self.food_positions_cache, self.door_open_array
         )
 
@@ -912,18 +970,21 @@ class GridMazeWorld(gym.Env):
         if not hasattr(self, '_render_buffer') or self._render_buffer is None:
             cell_size = max(1, self.render_size // self.grid_size)
             self._render_buffer = np.zeros(
-                (self.grid_size * cell_size, self.grid_size * cell_size, 3), 
+                (self.grid_size * cell_size, self.grid_size * cell_size, 3),
                 dtype=np.uint8
             )
             self._cell_size = cell_size
+
         self._render_buffer.fill(0)
+
         for y in range(self.grid_size):
             for x in range(self.grid_size):
                 color = self.colors[self.grid[y, x]]
                 y_start = y * self._cell_size
                 x_start = x * self._cell_size
-                self._render_buffer[y_start:y_start + self._cell_size, 
+                self._render_buffer[y_start:y_start + self._cell_size,
                                   x_start:x_start + self._cell_size] = color
+
         if self.food_sources is not None:
             for i in range(self.food_sources.shape[0]):
                 y, x, _, has_food = self.food_sources[i]
@@ -931,15 +992,21 @@ class GridMazeWorld(gym.Env):
                     center_y = int((y + 0.5) * self._cell_size)
                     center_x = int((x + 0.5) * self._cell_size)
                     radius = max(1, self._cell_size // 3)
-                    cv2.circle(self._render_buffer, (center_x, center_y), radius, (0, 255, 0), -1)
+                    cv2.circle(self._render_buffer, (center_x, center_y),
+                               radius, (0, 255, 0), -1)
+
         ay, ax = int(self.agent_pos[0]), int(self.agent_pos[1])
         center_y = int((ay + 0.5) * self._cell_size)
         center_x = int((ax + 0.5) * self._cell_size)
         radius = max(1, self._cell_size // 2)
-        cv2.circle(self._render_buffer, (center_x, center_y), radius, (255, 255, 255), -1)
+        cv2.circle(self._render_buffer, (center_x, center_y),
+                   radius, (255, 255, 255), -1)
+
         info = f"Energy: {self.energy:.1f} | Step: {self.steps}/{self.max_steps}"
         info += f" | Task: {self.task_class} (Lvl: {self.complexity_level:.1f})"
-        cv2.putText(self._render_buffer, info, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+        cv2.putText(self._render_buffer, info, (10, 30),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+
         return self._render_buffer
 
     def close(self):
@@ -952,7 +1019,9 @@ class VectorGridMazeWorld(GridMazeWorld):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self._render_buffer = None
+
     def render(self):
         return None
+
     def close(self):
         pass
