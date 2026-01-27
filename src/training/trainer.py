@@ -170,20 +170,42 @@ class ComplexityManager:
         old_stage = self.curriculum_stages[old_stage_idx]
         old_complexity = self.stage_complexities[old_stage]
         
-        # Choose next stage (round robin, but could be random or based on other criteria)
-        next_idx = (old_stage_idx + 1) % len(self.curriculum_stages)
+        # Calculate weighted probabilities for next stage
+        # Higher probability to stay in current stage or progress to next
+        # But always allow some probability to return to earlier stages for consolidation
         
-        # NEW: Ensure we don't switch back to basic unless all other tasks are at high complexity
-        if next_idx == 0 and old_stage_idx > 0:
-            # Check if other stages are mastered enough to return to basic
-            other_stages_mastered = all(
-                self.stage_complexities[stage] >= 0.8 
-                for stage in self.curriculum_stages[1:]
-            )
+        stage_weights = np.zeros(len(self.curriculum_stages))
+        
+        # Base weight for each stage depends on how recently we visited it
+        # and its current complexity level
+        for i, stage in enumerate(self.curriculum_stages):
+            # Recent visit penalty - avoid bouncing too quickly
+            recent_penalty = 1.0
+            if i == old_stage_idx:
+                recent_penalty = 0.3  # Less likely to stay in same stage if stagnating
+            elif i == (old_stage_idx - 1) % len(self.curriculum_stages):
+                recent_penalty = 0.5  # Less likely to go back immediately
             
-            if not other_stages_mastered:
-                # Skip basic and go to the next non-basic stage
-                next_idx = 1 if len(self.curriculum_stages) > 1 else 0
+            # Complexity-based weight - prefer stages at moderate complexity
+            stage_complexity = self.stage_complexities[stage]
+            complexity_weight = 1.0 - abs(stage_complexity - 0.5)  # Prefer ~0.5 complexity
+            
+            # Distance weight - prefer next stage in curriculum
+            distance = (i - old_stage_idx) % len(self.curriculum_stages)
+            if distance == 1:
+                distance_weight = 2.0  # Most likely: progress forward
+            elif distance == 0:
+                distance_weight = 1.0  # Same stage
+            else:
+                distance_weight = 0.7  # Going backward or skipping
+            
+            stage_weights[i] = recent_penalty * complexity_weight * distance_weight
+        
+        # Normalize to probabilities
+        stage_probs = stage_weights / stage_weights.sum()
+        
+        # Sample next stage
+        next_idx = np.random.choice(len(self.curriculum_stages), p=stage_probs)
         
         self.current_stage_idx = next_idx
         new_stage = self.curriculum_stages[next_idx]
@@ -202,7 +224,8 @@ class ComplexityManager:
             "old_complexity": old_complexity,
             "new_complexity": new_complexity,
             "adjusted": True,
-            "reason": f"Stagnation for {self.epochs_without_progress} epochs"
+            "reason": f"Stagnation for {self.epochs_without_progress} epochs",
+            "stage_probs": stage_probs.tolist()  # For debugging
         }
         
         return adjustment_info

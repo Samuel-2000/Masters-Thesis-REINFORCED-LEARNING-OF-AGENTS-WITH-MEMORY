@@ -102,6 +102,7 @@ class Door:
     can_be_opened: bool = True
     requires_button: bool = True
     is_choke_point: bool = False
+    door_number: int = -1
 
     def update(self, agent_pos: Optional[np.ndarray] = None):
         if agent_pos is not None and len(agent_pos) >= 2:
@@ -136,6 +137,7 @@ class Button:
     door_idx: int
     is_broken: bool = False
     break_probability: float = 0.0
+    button_number: int = -1
 
     def press(self):
         if not self.is_broken:
@@ -962,6 +964,7 @@ class GridMazeWorld(gym.Env):
         placed_doors = 0
         attempts = 0
         max_attempts = 50
+        next_door_number = 1  # Start numbering from 1
 
         while placed_doors < self.n_doors and attempts < max_attempts:
             attempts += 1
@@ -995,17 +998,19 @@ class GridMazeWorld(gym.Env):
                                 close_duration=self.door_close_duration,
                                 requires_button=False,
                                 can_be_opened=True,
-                                is_choke_point=True)
+                                is_choke_point=True,
+                                door_number=next_door_number)  # Assign door number
                     door.is_open = np.random.random() < 0.5
                     door_idx = len(self.doors)
                     self.doors.append(door)
                     self.grid[y, x] = TileType.DOOR_CLOSED
                     current_grid[y, x] = TileType.DOOR_CLOSED
                     self.door_open_array[y, x] = 1 if door.is_open else 0
+                    next_door_number += 1
                     placed_doors += 1
                     door_placed_this_round = True
                     if self.debug:
-                        print(f"Placed periodic door at ({y},{x})")
+                        print(f"Placed periodic door #{door.door_number} at ({y},{x})")
                     break
                 else:
                     can_place, button_positions = self._can_place_door_with_buttons(y, x, current_grid)
@@ -1015,21 +1020,32 @@ class GridMazeWorld(gym.Env):
                                     close_duration=self.door_close_duration,
                                     requires_button=True,
                                     can_be_opened=True,
-                                    is_choke_point=True)
+                                    is_choke_point=True,
+                                    door_number=next_door_number)  # Assign door number
                         door_idx = len(self.doors)
                         self.doors.append(door)
                         self.grid[y, x] = TileType.DOOR_CLOSED
                         current_grid[y, x] = TileType.DOOR_CLOSED
                         self.door_open_array[y, x] = 0
-                        for by, bx in button_positions:
-                            button = Button(y=by, x=bx, door_idx=door_idx, break_probability=self.button_break_probability, is_broken=False)
+                        
+                        # Create buttons for this door
+                        for btn_idx, (by, bx) in enumerate(button_positions):
+                            button = Button(y=by, x=bx, 
+                                        door_idx=door_idx, 
+                                        break_probability=self.button_break_probability, 
+                                        is_broken=False,
+                                        button_number=next_door_number)  # Same number as door
                             self.buttons.append(button)
                             self.grid[by, bx] = TileType.BUTTON
                             current_grid[by, bx] = TileType.BUTTON
+                            if self.debug:
+                                print(f"  Placed button #{button.button_number} for door #{door.door_number} at ({by},{bx})")
+                        
+                        next_door_number += 1
                         placed_doors += 1
                         door_placed_this_round = True
                         if self.debug:
-                            print(f"Placed button door at ({y},{x})")
+                            print(f"Placed button door #{door.door_number} at ({y},{x})")
                         break
 
             if not door_placed_this_round:
@@ -1042,6 +1058,9 @@ class GridMazeWorld(gym.Env):
 
         if self.debug:
             print(f"Placed {placed_doors} doors and {len(self.buttons)} buttons total.")
+            for door in self.doors:
+                buttons_for_door = [b for b in self.buttons if b.door_idx == self.doors.index(door)]
+                print(f"Door #{door.door_number} at ({door.y},{door.x}): {len(buttons_for_door)} buttons")
 
     # ---------------- rest of env (reset/step/render/etc) -----------------
     def reset(self, seed: Optional[int] = None, options: Optional[Dict] = None) -> Tuple[np.ndarray, Dict]:
@@ -1263,14 +1282,66 @@ class GridMazeWorld(gym.Env):
 
         self._render_buffer.fill(0)
 
+        # Draw grid tiles
         for y in range(self.grid_size):
             for x in range(self.grid_size):
                 color = self.colors[self.grid[y, x]]
                 y_start = y * self._cell_size
                 x_start = x * self._cell_size
                 self._render_buffer[y_start:y_start + self._cell_size,
-                                  x_start:x_start + self._cell_size] = color
+                                x_start:x_start + self._cell_size] = color
 
+        # Draw door numbers
+        for door in self.doors:
+            y_start = door.y * self._cell_size
+            x_start = door.x * self._cell_size
+            center_y = int((door.y + 0.5) * self._cell_size)
+            center_x = int((door.x + 0.5) * self._cell_size)
+            
+            # Draw door number
+            font_scale = self._cell_size / 30.0
+            thickness = max(1, int(self._cell_size / 20))
+            
+            # Draw background circle for better visibility
+            radius = max(2, self._cell_size // 4)
+            circle_color = (50, 50, 50) if door.is_open else (200, 200, 200)
+            cv2.circle(self._render_buffer, (center_x, center_y), radius, circle_color, -1)
+            
+            # Draw door number
+            text = str(door.door_number)
+            text_size = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness)[0]
+            text_x = center_x - text_size[0] // 2
+            text_y = center_y + text_size[1] // 2
+            cv2.putText(self._render_buffer, text, (text_x, text_y),
+                    cv2.FONT_HERSHEY_SIMPLEX, font_scale, (0, 0, 0), thickness)
+
+        # Draw button numbers
+        for button in self.buttons:
+            y_start = button.y * self._cell_size
+            x_start = button.x * self._cell_size
+            center_y = int((button.y + 0.5) * self._cell_size)
+            center_x = int((button.x + 0.5) * self._cell_size)
+            
+            # Draw button number (same as door number)
+            font_scale = self._cell_size / 30.0
+            thickness = max(1, int(self._cell_size / 20))
+            
+            # Draw background circle
+            radius = max(2, self._cell_size // 5)
+            circle_color = (200, 0, 0) if button.is_broken else (0, 0, 200)
+            cv2.circle(self._render_buffer, (center_x, center_y), radius, circle_color, -1)
+            
+            # Draw button number (same as the door it belongs to)
+            door = self.doors[button.door_idx]
+            text = str(door.door_number)
+            text_size = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness)[0]
+            text_x = center_x - text_size[0] // 2
+            text_y = center_y + text_size[1] // 2
+            text_color = (255, 255, 255) if button.is_broken else (255, 255, 255)
+            cv2.putText(self._render_buffer, text, (text_x, text_y),
+                    cv2.FONT_HERSHEY_SIMPLEX, font_scale, text_color, thickness)
+
+        # Draw food sources
         if self.food_sources is not None:
             for i in range(self.food_sources.shape[0]):
                 y, x, _, has_food = self.food_sources[i]
@@ -1279,26 +1350,53 @@ class GridMazeWorld(gym.Env):
                     center_x = int((x + 0.5) * self._cell_size)
                     radius = max(1, self._cell_size // 3)
                     cv2.circle(self._render_buffer, (center_x, center_y),
-                               radius, (0, 255, 0), -1)
+                            radius, (0, 255, 0), -1)
 
+        # Draw agent
         ay, ax = int(self.agent_pos[0]), int(self.agent_pos[1])
         center_y = int((ay + 0.5) * self._cell_size)
         center_x = int((ax + 0.5) * self._cell_size)
         radius = max(1, self._cell_size // 2)
         cv2.circle(self._render_buffer, (center_x, center_y),
-                   radius, (255, 255, 255), -1)
+                radius, (255, 255, 255), -1)
 
+        # Draw info text
         info = f"Energy: {self.energy:.1f} | Step: {self.steps}/{self.max_steps}"
         info += f" | Task: {self.task_class} (Lvl: {self.complexity_level:.1f})"
-        cv2.putText(self._render_buffer, info, (10, 30),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+        info_doors = f"Doors: {len(self.doors)} | Buttons: {len(self.buttons)}"
+        cv2.putText(self._render_buffer, info, (10, 15), cv2.QT_FONT_NORMAL, 0.55, (255, 255, 255), 1)
+        
+        cv2.putText(self._render_buffer, info_doors, (10, 35), cv2.QT_FONT_NORMAL, 0.55, (255, 255, 255), 1)
+
+        # Draw door/button legend if there are doors
+        """
+        if self.doors:
+            legend_y = 60
+            cv2.putText(self._render_buffer, "Door-Button Mapping:", (10, legend_y),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
+            legend_y += 25
+            
+            for door in self.doors:
+                buttons_for_door = [b for b in self.buttons if b.door_idx == self.doors.index(door)]
+                status = "OPEN" if door.is_open else "CLOSED"
+                button_statuses = []
+                for btn in buttons_for_door:
+                    btn_status = "BROKEN" if btn.is_broken else "OK"
+                    button_statuses.append(btn_status)
+                
+                legend_text = f"Door #{door.door_number}: {status}"
+                if buttons_for_door:
+                    legend_text += f" | Buttons: {', '.join(button_statuses)}"
+                
+                cv2.putText(self._render_buffer, legend_text, (20, legend_y),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
+                legend_y += 20
+                if legend_y > self._render_buffer.shape[0] - 50:
+                    break
+                    
+        """
 
         return self._render_buffer
-
-    def close(self):
-        if hasattr(self, '_render_buffer'):
-            self._render_buffer = None
-        cv2.destroyAllWindows()
 
 
 class VectorGridMazeWorld(GridMazeWorld):
