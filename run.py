@@ -258,15 +258,6 @@ def main():
                 print(f"\n{'='*60}")
                 print(f"Test {config_idx+1}/{len(test_configs)}")
                 print(f"{'='*60}")
-                #print(f"Task class: {config['task_class']}")
-                #print(f"Complexity level: {config['complexity_level']:.2f}")
-
-                print(f"DEBUG - Creating env with params:")
-                print(f"  task_class: {config['task_class']}")
-                print(f"  complexity_level: {config['complexity_level']}")
-                print(f"  n_doors: {config['n_doors']}")
-                print(f"  n_buttons_per_door: {config['n_buttons_per_door']}")
-                print(f"  door_periodic: {config['door_periodic']}")
 
                 
                 # Create environment
@@ -288,19 +279,7 @@ def main():
                     'button_break_probability': config['button_break_probability']
                 }, test_mode=True)
 
-                print(f"DEBUG - Env created with:")
-                print(f"  env.task_class: {env.task_class}")
-                print(f"  env.complexity_level: {env.complexity_level}")
-                print(f"  env.n_doors: {env.n_doors}")
-                print(f"  env.door_periodic: {env.door_periodic}")
 
-                #if config['task_class'] != 'basic':
-                #    print(f"Number of doors: {env.n_doors}")
-                #    print(f"  Doors periodic: {env.door_periodic}")
-                #    print(f"  Buttons per door: {env.n_buttons_per_door}")
-                #    if env.button_break_probability > 0:
-                #        print(f"    Button break probability: {env.button_break_probability:.2f}")
-                
                 # Create model name for video naming
                 if len(test_configs) > 1:
                     # Always include stage and complexity for multiple tests
