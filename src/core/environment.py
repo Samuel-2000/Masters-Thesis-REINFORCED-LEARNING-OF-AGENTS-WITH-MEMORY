@@ -88,21 +88,19 @@ def _label_components_numba_inplace(pass_mask: np.ndarray, labels: np.ndarray):
 
     return nlabels
 
-
-
 # --------------------- Data classes ----------------------------------
 @dataclass
 class Door:
     y: int
     x: int
+    open_duration: int
+    close_duration: int
+    can_be_opened: bool
+    requires_button: bool
+    is_choke_point: bool
+    door_number: int
     is_open: bool = False
     timer: int = 0
-    open_duration: int = 10
-    close_duration: int = 20
-    can_be_opened: bool = True
-    requires_button: bool = True
-    is_choke_point: bool = False
-    door_number: int = -1
 
     def update(self, agent_pos: Optional[np.ndarray] = None):
         if agent_pos is not None and len(agent_pos) >= 2:
@@ -135,29 +133,30 @@ class Button:
     y: int
     x: int
     door_idx: int
+    break_probability: float
+    button_number: int
     is_broken: bool = False
-    break_probability: float = 0.0
-    button_number: int = -1
 
     def press(self):
-        if not self.is_broken:
-            if self.break_probability > 0 and np.random.random() < self.break_probability:
-                self.is_broken = True
-                return False
-            return True
-        return False
-
-
+        if self.is_broken:
+            return False
+        
+        if self.break_probability > 0.0 and np.random.random() < self.break_probability:
+            self.is_broken = True
+            return False
+        
+        return True
+        
 # ------------------ Template tree node & matcher -----------------------
 class TemplateNode:
     __slots__ = ('split_pos', 'pass_child', 'obs_child', 'templates', 'is_leaf')
 
-    def __init__(self, split_pos: int = -1, is_leaf: bool = False):
+    def __init__(self, is_leaf: bool, split_pos: int = -1):
+        self.is_leaf = is_leaf
         self.split_pos = split_pos
         self.pass_child = None
         self.obs_child = None
         self.templates: List[int] = []
-        self.is_leaf = is_leaf
 
 
 class FastTemplateMatcher:
@@ -175,7 +174,7 @@ class FastTemplateMatcher:
                 (1, -1), (1, 0), (1, 1)]
     _CENTER_IDX = 4
 
-    def __init__(self, templates_flat: List[np.ndarray], max_depth: int = 4):
+    def __init__(self, templates_flat: List[np.ndarray], max_depth: int):
         """
         templates_flat: list of 9-element arrays with values in {-1,0,1}
         """
@@ -570,13 +569,12 @@ def bfs_reachable_mask(passable_mask: np.ndarray, h: int, w: int,
 
 # ------------------------- GridMazeWorld -------------------------------
 class GridMazeWorld(gym.Env):
-    def __init__(self, grid_size: int = DEFAULT_GRID_SIZE, max_steps: int = DEFAULT_MAX_STEPS,
-                 obstacle_fraction: float = DEFAULT_OBSTACLE_FRACTION, n_food_sources: int = DEFAULT_FOOD_SOURCES,
-                 food_energy: float = DEFAULT_FOOD_ENERGY, initial_energy: float = DEFAULT_INITIAL_ENERGY,
-                 energy_decay: float = DEFAULT_ENERGY_DECAY, energy_per_step: float = DEFAULT_ENERGY_PER_STEP,
-                 render_size: int = 512, task_class: str = TaskClass.BASIC, complexity_level: float = 0.0,
-                 n_doors: int = -1, door_open_duration: int = 10, door_close_duration: int = 20,
-                 n_buttons_per_door: int = -1, button_break_probability: float = -1.0, door_periodic: bool = None):
+    def __init__(self, grid_size: int, max_steps: int, obstacle_fraction: float, 
+                 n_food_sources: int, food_energy: float, initial_energy: float,
+                 energy_decay: float, energy_per_step: float,
+                 render_size: int, task_class: str, complexity_level: float,
+                 n_doors: int, door_open_duration: int, door_close_duration: int,
+                 n_buttons_per_door: int, button_break_probability: float):
         super().__init__()
         self.grid_size = grid_size
         self.max_steps = max_steps
@@ -587,13 +585,12 @@ class GridMazeWorld(gym.Env):
         self.energy_per_step = energy_per_step
         self.render_size = render_size
         self.task_class = task_class
-        self.complexity_level = max(0.0, min(1.0, complexity_level))
+        self.complexity_level = 0.5 if complexity_level is None else max(0.0, min(1.0, complexity_level))
         self.door_open_duration = door_open_duration
         self.door_close_duration = door_close_duration
         self.n_doors = n_doors
         self.n_buttons_per_door = n_buttons_per_door
         self.button_break_probability = button_break_probability
-        self.door_periodic = door_periodic
         self._adjust_parameters_by_task_class()
         self.n_obstacles = int((grid_size - 2) ** 2 * obstacle_fraction)
         self.action_space = spaces.Discrete(NUM_ACTIONS)
@@ -632,29 +629,25 @@ class GridMazeWorld(gym.Env):
             self.n_doors = 0
             self.n_buttons_per_door = 0
             self.button_break_probability = 0.0
-            self.door_periodic = False
         elif self.task_class == TaskClass.DOORS:
-            if self.n_doors == -1:
+            if self.n_doors == None:
                 self.n_doors = max(1, int(self.complexity_level * 3))
             self.n_buttons_per_door = 0
             self.button_break_probability = 0.0
-            self.door_periodic = True
         elif self.task_class == TaskClass.BUTTONS:
-            if self.n_doors == -1:
+            if self.n_doors == None:
                 self.n_doors = max(1, int(self.complexity_level * 3))
-            if self.n_buttons_per_door == -1:
+            if self.n_buttons_per_door == None:
                 self.n_buttons_per_door = 4
-            if self.button_break_probability == -1.0:
+            if self.button_break_probability == None:
                 self.button_break_probability = self.complexity_level * 0.2
-            self.door_periodic = False
         elif self.task_class == TaskClass.COMPLEX:
-            if self.n_doors == -1:
+            if self.n_doors == None:
                 self.n_doors = max(2, int(self.complexity_level * 4))
-            if self.n_buttons_per_door == -1:
+            if self.n_buttons_per_door == None:
                 self.n_buttons_per_door = 4
-            if self.button_break_probability == -1.0:
+            if self.button_break_probability == None:
                 self.button_break_probability = self.complexity_level * 0.3
-            self.door_periodic = True
 
     # ---------------- Templates ------------------------------------------
     def _templates_flat_list(self) -> List[np.ndarray]:

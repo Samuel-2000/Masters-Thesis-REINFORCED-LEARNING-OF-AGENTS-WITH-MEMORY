@@ -39,19 +39,6 @@ class HumanAgent:
     
     def act(self, observation: np.ndarray = None) -> int:
         """Get action from keyboard input"""
-        print("\n" + "="*50)
-        print("HUMAN CONTROL MODE - Waiting for input...")
-        print("="*50)
-        print("Controls:")
-        print(f"  Move Left:    {self.key_descriptions[Actions.LEFT]}")
-        print(f"  Move Right:   {self.key_descriptions[Actions.RIGHT]}")
-        print(f"  Move Up:      {self.key_descriptions[Actions.UP]}")
-        print(f"  Move Down:    {self.key_descriptions[Actions.DOWN]}")
-        print(f"  Stay:         {self.key_descriptions[Actions.STAY]}")
-        print(f"  Press Button: {self.key_descriptions[Actions.BUTTON]}")
-        print("  Quit:         Q or Esc")
-        print("="*50)
-        
         while True:
             key = cv2.waitKey(0) & 0xFF
             
@@ -67,7 +54,7 @@ class HumanAgent:
             
             print(f"Invalid key: {chr(key) if key < 128 else key}. Try again.")
     
-    def test(self, env, episodes: int = 1, visualize: bool = True) -> Dict[str, Any]:
+    def test(self, env, episodes: int) -> Dict[str, Any]:
         """Test human agent performance"""
         rewards = []
         success_flags = []
@@ -80,6 +67,19 @@ class HumanAgent:
         print(f"Complexity Level: {env.complexity_level:.2f}")
         print(f"Max Steps: {env.max_steps}")
         print("="*60)
+
+        print("\n" + "="*50)
+        print("HUMAN CONTROL MODE - Waiting for input...")
+        print("="*50)
+        print("Controls:")
+        print(f"  Move Left:    {self.key_descriptions[Actions.LEFT]}")
+        print(f"  Move Right:   {self.key_descriptions[Actions.RIGHT]}")
+        print(f"  Move Up:      {self.key_descriptions[Actions.UP]}")
+        print(f"  Move Down:    {self.key_descriptions[Actions.DOWN]}")
+        print(f"  Stay:         {self.key_descriptions[Actions.STAY]}")
+        print(f"  Press Button: {self.key_descriptions[Actions.BUTTON]}")
+        print("  Quit:         Q or Esc")
+        print("="*50)
         
         for episode in range(episodes):
             print(f"\nEpisode {episode + 1}/{episodes}")
@@ -91,10 +91,9 @@ class HumanAgent:
             
             while not (terminated or truncated) and steps < env.max_steps:
                 # Render the environment
-                if visualize:
-                    frame = env.render()
-                    if frame is not None:
-                        cv2.imshow('Human Play Mode', frame)
+                frame = env.render()
+                if frame is not None:
+                    cv2.imshow('Human Play Mode', frame)
                 
                 # Get human action
                 action = self.act()
@@ -124,11 +123,9 @@ class HumanAgent:
             print(f"  Steps: {steps}/{env.max_steps}")
             print(f"  Final Energy: {info['energy']:.1f}")
             
-            if visualize:
-                cv2.waitKey(1000)  # Pause between episodes
+            cv2.waitKey(1000)  # Pause between episodes
         
-        if visualize:
-            cv2.destroyAllWindows()
+        cv2.destroyAllWindows()
         
         return {
             'rewards': rewards,

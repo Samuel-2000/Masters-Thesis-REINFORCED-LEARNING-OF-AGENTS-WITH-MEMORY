@@ -32,23 +32,22 @@ class ComplexityManager:
         self.training_config = config['training']
         
         # Dynamic complexity settings
-        self.enabled = self.training_config.get('dynamic_complexity', False)
-        self.performance_window = self.training_config.get('performance_window', 100)
-        self.increase_threshold = self.training_config.get('complexity_increase_threshold', 0.95)
-        self.decrease_threshold = self.training_config.get('complexity_decrease_threshold', 0.7)
-        self.complexity_step = self.training_config.get('complexity_step', 0.05)
-        self.min_complexity = self.training_config.get('min_complexity', 0.0)
-        self.max_complexity = self.training_config.get('max_complexity', 1.0)
-        self.adjustment_interval = self.training_config.get('adjustment_interval', 500)
-        self.stagnation_threshold = self.training_config.get('stagnation_threshold', 10)  # epochs without progress
-        self.stagnation_check_interval = self.training_config.get('stagnation_check_interval', 100)  # NEW: check every 100 episodes
-        self.min_basic_complexity = self.training_config.get('min_basic_complexity', 0.3)  # NEW: minimum before switching from basic
-        self.curriculum_stages = self.training_config.get('curriculum_stages', 
-                                                         ["basic", "doors", "buttons", "complex"])
+        self.enabled = self.training_config['dynamic_complexity']
+        self.performance_window = self.training_config['performance_window']
+        self.increase_threshold = self.training_config['complexity_increase_threshold']
+        self.decrease_threshold = self.training_config['complexity_decrease_threshold']
+        self.complexity_step = self.training_config['complexity_step']
+        self.min_complexity = self.training_config['min_complexity']
+        self.max_complexity = self.training_config['max_complexity']
+        self.adjustment_interval = self.training_config['adjustment_interval']
+        self.stagnation_switch_interval = self.training_config['stagnation_switch_interval']
+        self.stagnation_termination = self.training_config['stagnation_termination']
+        self.min_basic_complexity = self.training_config['min_basic_complexity']
+        self.curriculum_stages = self.training_config['curriculum_stages']
         
         # Current state - each stage maintains its own complexity
         self.current_stage_idx = 0
-        self.stage_complexities = {stage: config['environment'].get('complexity_level', 0.0) 
+        self.stage_complexities = {stage: config['environment']['complexity_level'] 
                                   for stage in self.curriculum_stages}
         
         # Performance tracking
@@ -79,13 +78,13 @@ class ComplexityManager:
     def get_current_task_class(self) -> str:
         """Get current task class based on curriculum stage"""
         if not self.enabled or self.current_stage_idx >= len(self.curriculum_stages):
-            return self.config['environment'].get('task_class', 'basic')
+            return self.config['environment']['task_class']
         return self.curriculum_stages[self.current_stage_idx]
     
     def get_current_complexity(self) -> float:
         """Get current complexity level"""
         if not self.enabled:
-            return self.config['environment'].get('complexity_level', 0.0)
+            return self.config['environment']['complexity_level']
         
         current_stage = self.get_current_task_class()
         return self.stage_complexities[current_stage]
@@ -110,8 +109,8 @@ class ComplexityManager:
         if not self.enabled:
             return False
         
-        # NEW: Only check stagnation every stagnation_check_interval episodes
-        if epoch - self.last_stagnation_check < self.stagnation_check_interval:
+        # NEW: Only check stagnation every stagnation_switch_interval episodes
+        if epoch - self.last_stagnation_check < self.stagnation_switch_interval:
             return False
         
         self.last_stagnation_check = epoch  # Update last check time
@@ -124,7 +123,7 @@ class ComplexityManager:
             return False
         
         # Switch if we've been stuck for too long
-        if self.epochs_without_progress >= self.stagnation_threshold:
+        if self.epochs_without_progress >= self.stagnation_termination:
             return True
         
         # Optional: Check for oscillation (could be enhanced with more sophisticated detection)
@@ -311,28 +310,24 @@ class ComplexityManager:
                 # Basic stage: no doors
                 env_config['n_doors'] = 0
                 env_config['n_buttons_per_door'] = 0
-                env_config['door_periodic'] = False
                 env_config['button_break_probability'] = 0.0
                 
             elif current_stage == 'doors':
                 # Doors stage: periodic doors, no buttons
                 env_config['n_doors'] = -1
                 env_config['n_buttons_per_door'] = 0
-                env_config['door_periodic'] = True
                 env_config['button_break_probability'] = 0.0
                 
             elif current_stage == 'buttons':
                 # Buttons stage: doors with buttons
                 env_config['n_doors'] = -1
                 env_config['n_buttons_per_door'] = -1
-                env_config['door_periodic'] = False
                 env_config['button_break_probability'] = -1.0
                 
             elif current_stage == 'complex':
                 # Complex stage: mix of periodic and button doors
                 env_config['n_doors'] = -1
                 env_config['n_buttons_per_door'] = -1
-                env_config['door_periodic'] = True  # Some doors periodic
                 env_config['button_break_probability'] = -1.0
         
         return env_config
@@ -367,15 +362,15 @@ class AdaptiveParallelTrainer:
                  use_wandb: bool = False):
         
         self.config = config
-        self.experiment_name = f"{config["model"]["type"]}_" \
-                                f"{config["training"]["batch_size"]}b_" \
-                                f"{config["training"]["learning_rate"]}lr_" \
+        self.experiment_name = f"{config['model']['type']}_" \
+                                f"{config['training']['batch_size']}b_" \
+                                f"{config['training']['learning_rate']}lr_" \
                                 f"{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}"
         
-        if config["training"].get("auxiliary_tasks", None):
+        if config['training']['auxiliary_tasks']:
             self.experiment_name += "_aux"
         
-        if config["training"].get("dynamic_complexity", False):
+        if config['training']['dynamic_complexity']:
             self.experiment_name += "_dynamic"
         
         self.use_wandb = use_wandb
@@ -387,7 +382,7 @@ class AdaptiveParallelTrainer:
         )
         
         # Set seed
-        seed_everything(config.get('seed', 42))
+        seed_everything(config['experiment']['seed'])
         
         # Get batch size for parallel environments
         training_config = self.config['training']
@@ -407,8 +402,8 @@ class AdaptiveParallelTrainer:
         
         # Create loss functions
         self.policy_loss_fn = PolicyLoss(
-            gamma=training_config.get('gamma', 0.97),
-            entropy_coef=training_config.get('entropy_coef', 0.01),
+            gamma=training_config['gamma'],
+            entropy_coef=training_config['entropy_coef'],
             normalize_advantages=True
         )
         
@@ -423,12 +418,12 @@ class AdaptiveParallelTrainer:
             self.aux_loss_fn = None
             
         self.gradient_clipper = GradientClipper(
-            max_norm=training_config.get('max_grad_norm', 1.0)
+            max_norm=training_config['max_grad_norm']
         )
         self.lr_scheduler = LearningRateScheduler(
             self.optimizer,
             mode='cosine',
-            lr_start=training_config.get('learning_rate', 0.0005),
+            lr_start=training_config['learning_rate'],
             lr_min=1e-6
         )
         
@@ -596,8 +591,8 @@ class AdaptiveParallelTrainer:
             network_type=model_config['type'],
             observation_size=10,  # Fixed observation size
             action_size=6,  # Fixed action size
-            hidden_size=model_config.get('hidden_size', 512),
-            use_auxiliary=model_config.get('use_auxiliary', False),
+            hidden_size=model_config['hidden_size'],
+            use_auxiliary=model_config['use_auxiliary'],
             device=self.device
         )
         
@@ -611,9 +606,9 @@ class AdaptiveParallelTrainer:
         """Create optimizer"""
         training_config = self.config['training']
         
-        optimizer_type = training_config.get('optimizer', 'adam')
-        lr = training_config.get('learning_rate', 0.0005)
-        weight_decay = training_config.get('weight_decay', 0.0)
+        optimizer_type = training_config['optimizer']
+        lr = training_config['learning_rate']
+        weight_decay = training_config['weight_decay']
         
         if optimizer_type == 'adam':
             return optim.Adam(
@@ -640,9 +635,9 @@ class AdaptiveParallelTrainer:
         print("=" * 50)
 
         training_config = self.config['training']
-        epochs = training_config.get('epochs', 10000)
-        save_interval = training_config.get('save_interval', 1000)
-        test_interval = training_config.get('test_interval', 500)
+        epochs = training_config['epochs']
+        save_interval = training_config['save_interval']
+        test_interval = training_config['test_interval']
         
         # Create progress bar
         pbar = tqdm(range(epochs), desc="Training", unit="epoch")
@@ -802,11 +797,11 @@ class AdaptiveParallelTrainer:
     
     def _handle_complexity_adjustment(self, adjustment: Dict[str, Any], epoch: int):
         """Handle complexity adjustment"""
-        action = adjustment.get('action', 'unknown')
-        old_complexity = adjustment.get('old_complexity', 0.0)
-        new_complexity = adjustment.get('new_complexity', 0.0)
-        old_stage = adjustment.get('old_stage', 'basic')
-        new_stage = adjustment.get('new_stage', 'basic')
+        action = adjustment['action']
+        old_complexity = adjustment['old_complexity']
+        new_complexity = adjustment['new_complexity']
+        old_stage = adjustment['old_stage']
+        new_stage = adjustment['new_stage']
         
         # Log the adjustment
         #self.logger.info(f"Complexity adjustment at epoch {epoch}:")
@@ -1051,7 +1046,7 @@ class AdaptiveParallelTrainer:
     
     def _save_model(self, name: str):
         """Save model checkpoint with complexity information"""
-        save_dir = Path(self.config.get('save_dir', 'models'))
+        save_dir = Path(self.config['save_dir'])
         save_dir.mkdir(exist_ok=True)
         
         # For 'best' and 'final', save the agent file

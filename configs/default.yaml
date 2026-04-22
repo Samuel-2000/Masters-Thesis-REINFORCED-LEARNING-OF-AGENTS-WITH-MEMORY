@@ -23,7 +23,6 @@ environment:
   door_close_duration: 20
   n_buttons_per_door: 1
   button_break_probability: 0.0
-  door_periodic: false
 
 model:
   type: "lstm"  # lstm, transformer, multimemory

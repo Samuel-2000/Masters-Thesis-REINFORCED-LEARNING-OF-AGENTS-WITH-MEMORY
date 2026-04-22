@@ -1,350 +1,198 @@
-#parser.py
+# parser.py
 import argparse
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Memory Maze RL Experiments",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description="Memory Maze RL Experiments – Explicit parameters.",
         epilog="""
         Examples:
-            python run.py train --config configs/transformer.yaml
-            python run.py train --network-type transformer --auxiliary-tasks
-            python run.py test --model models/transformer_best.pt
-            python run.py benchmark --benchmark-episodes 50
-            python run.py visualize --model models/transformer_best.pt --save-video
-            python run.py train --task-class complex --complexity-level 0.5
-            python run.py test --model models/lstm_best.pt --task-class doors --complexity-level 0.7
-            python run.py train --dynamic-complexity --performance-window 100 --adjustment-interval 500
+            # Train with dynamic complexity
+            python run.py train --network-type lstm --epochs 10000 --batch-size 64 --lr 0.0005 [--auxiliary-tasks] --dynamic-complexity [--curriculum-stages basic doors buttons complex --performance-window 100 --adjustment-interval 500 --complexity-increase-threshold 0.95 --complexity-decrease-threshold 0.7 --complexity-step 0.05 --min-complexity 0.0 --max-complexity 1.0]
+
+            # Train without dynamic complexity (static environment)
+            python run.py train --network-type lstm --epochs 10000 --batch-size 64 --lr 0.0005 [--auxiliary-tasks] --task-class doors --complexity-level 0.7 [--n-doors 5]
+            python run.py train --network-type lstm --epochs 10000 --batch-size 64 --lr 0.0005 [--auxiliary-tasks] --task-class buttons [--n-doors 5 --n-buttons-per-door 4 --button-break-probability 0.0]
+            
+
+            
+            # Test a model statically
+            python run.py test --model models/lstm_best.pt --episodes 10 [--visualize] --task-class doors --complexity-level 0.7 [--n-doors 5]
+
+            # dynamic complexity test across stages and complexities
+            python run.py test --model models/lstm_best.pt --episodes 5 --dynamic-complexity [--stages basic doors buttons --complexities 0.0 0.5 1.0]
+                
+
+            # Human play mode
+            python run.py test --play --episodes 4 --task-class complex --complexity-level 0.5
+            python run.py test --play --episodes 1 --dynamic-complexity [--stages basic doors buttons --complexities 0.0 0.5 1.0]
         """
     )
-    
-    subparsers = parser.add_subparsers(dest="command", help="Command to run")
-    
-    # Train command
+    subparsers = parser.add_subparsers(dest="command", required=True, help="Command to run")
+
+    # ---------- train command ----------
     train_parser = subparsers.add_parser("train", help="Train a model")
-    train_parser.add_argument("--config", 
-                        type=str, 
-                        default="configs/default.yaml",
-                        help="Path to config file"
-                    )
-    train_parser.add_argument("--network-type", 
-                        choices=["lstm", "transformer", "multimemory"],
-                        default="lstm", 
-                        help="Network architecture"
-                    )
-    train_parser.add_argument("--auxiliary-tasks", 
-                        action="store_true",
-                        help="Use auxiliary tasks"
-                    )
-    train_parser.add_argument("--epochs", 
-                        type=int, 
-                        default=10000,
-                        help="Training epochs"
-                    )
-    train_parser.add_argument("--batch-size", 
-                        type=int, 
-                        default=64,
-                        help="Batch size"
-                    )
-    train_parser.add_argument("--lr", 
-                        type=float, 
-                        default=0.0005,
-                        help="Learning rate"
-                    )
-    train_parser.add_argument("--save-dir", 
-                        type=str, 
-                        default="models",
-                        help="Directory to save models"
-                    )
-    train_parser.add_argument("--experiment-name", 
-                        type=str, 
-                        default=None,
-                        help="Experiment name for logging"
-                    )
-    
-    # Environment complexity parameters for train
-    train_parser.add_argument("--task-class",
-                        type=str,
-                        choices=["basic", "doors", "buttons", "complex"],
-                        default="basic",
-                        help="Task class: basic, doors, buttons, complex"
-                    )
-    train_parser.add_argument("--complexity-level",
-                        type=float,
-                        default=0.0,
-                        help="Complexity level (0.0 to 1.0)"
-                    )
-    train_parser.add_argument("--n-doors",
-                        type=int,
-                        default=0,
-                        help="Number of doors in environment"
-                    )
-    train_parser.add_argument("--n-buttons-per-door",
-                        type=int,
-                        default=1,
-                        choices=[0, 1, 2, 3, 4],
-                        help="Buttons per door"
-                    )
-    train_parser.add_argument("--door-periodic",
-                        action="store_true",
-                        help="Doors open/close periodically"
-                    )
-    train_parser.add_argument("--button-break-probability",
-                        type=float,
-                        default=0.0,
-                        help="Probability that a button breaks when pressed (0.0 to 1.0)"
-                    )
-    
+    train_parser.add_argument("--network-type", required=True, choices=["lstm", "transformer", "multimemory"])
+    train_parser.add_argument("--epochs", required=True, type=int)
+    train_parser.add_argument("--batch-size", required=True, type=int)
+    train_parser.add_argument("--lr", required=True, type=float)
+    train_parser.add_argument("--auxiliary-tasks", action="store_true", default=False)
 
-    # NEW: Dynamic complexity parameters for train
-    train_parser.add_argument("--dynamic-complexity",
-                        action="store_true",
-                        help="Enable dynamic complexity adjustment based on performance"
-                    )
-    train_parser.add_argument("--performance-window",
-                        type=int,
-                        default=100,
-                        help="Number of episodes to consider for performance evaluation"
-                    )
-    train_parser.add_argument("--complexity-increase-threshold",
-                        type=float,
-                        default=0.95,
-                        help="Performance threshold to increase complexity (0.0 to 1.0)"
-                    )
-    train_parser.add_argument("--complexity-decrease-threshold",
-                        type=float,
-                        default=0.7,
-                        help="Performance threshold to decrease complexity (0.0 to 1.0)"
-                    )
-    train_parser.add_argument("--complexity-step",
-                        type=float,
-                        default=0.05,
-                        help="Step size for complexity adjustment"
-                    )
-    train_parser.add_argument("--min-complexity",
-                        type=float,
-                        default=0.0,
-                        help="Minimum complexity level"
-                    )
-    train_parser.add_argument("--max-complexity",
-                        type=float,
-                        default=1.0,
-                        help="Maximum complexity level"
-                    )
-    train_parser.add_argument("--adjustment-interval",
-                        type=int,
-                        default=500,
-                        help="Epochs between complexity adjustments"
-                    )
-    train_parser.add_argument("--curriculum-stages",
-                        nargs="+",
-                        default=["basic", "doors", "buttons", "complex"],
-                        choices=["basic", "doors", "buttons", "complex"],
-                        help="Curriculum stages in order"
-                    )
-    
-    # Test command
-    test_parser = subparsers.add_parser("test", help="Test a trained model")
-    test_parser.add_argument("--model", 
-                        type=str, 
-                        # Make required=False and we'll check manually
-                        required=False, 
-                        help="Path to trained model (not needed for --play mode)"
-                    )
-    test_parser.add_argument("--episodes", 
-                        type=int, 
-                        default=10, 
-                        help="Number of test episodes"
-                    )
-    test_parser.add_argument("--visualize", 
-                        action="store_true", 
-                        default=True, 
-                        help="Show visualization"
-                    )
-    test_parser.add_argument("--save-video", 
-                        action="store_true", 
-                        help="Save test video",
-                        default=True
-                    )
-    
-    # Environment complexity parameters for test
-    test_parser.add_argument("--task-class",
-                        type=str,
-                        choices=["basic", "doors", "buttons", "complex"],
-                        default="basic",
-                        help="Task class: basic, doors, buttons, complex"
-                    )
-    test_parser.add_argument("--complexity-level",
-                        type=float,
-                        default=0.0,
-                        help="Complexity level (0.0 to 1.0)"
-                    )
-    test_parser.add_argument("--n-doors",
-                        type=int,
-                        default=0,
-                        help="Number of doors in environment"
-                    )
-    test_parser.add_argument("--n-buttons-per-door",
-                        type=int,
-                        default=1,
-                        choices=[0, 1, 2, 3, 4],
-                        help="Buttons per door"
-                    )
-    test_parser.add_argument("--door-periodic",
-                        action="store_true",
-                        help="Doors open/close periodically"
-                    )
-    test_parser.add_argument("--button-break-probability",
-                        type=float,
-                        default=0.0,
-                        help="Probability that a button breaks when pressed (0.0 to 1.0)"
-                    )
-    
-    test_parser.add_argument('--dynamic',
-                        action='store_true',
-                        help='Test across all task classes and complexity levels'
-                    )
+    train_parser.add_argument("--save-dir", type=str, default="models", help="Directory to save models")
+    train_parser.add_argument("--experiment-name", type=str, default=None, help="Override experiment name")
 
-    test_parser.add_argument('--test-all-stages',
-                        action='store_true',
-                        help='Test all task classes with current complexity level'
-                    )
+    # Dynamic complexity parameters (required only if --dynamic-complexity is set)
+    train_parser.add_argument("--performance-window", type=int, default=None)
+    train_parser.add_argument("--complexity-increase-threshold", type=float, default=None)
+    train_parser.add_argument("--complexity-decrease-threshold", type=float, default=None)
+    train_parser.add_argument("--complexity-step", type=float, default=None)
+    train_parser.add_argument("--min-complexity", type=float, default=None)
+    train_parser.add_argument("--max-complexity", type=float, default=None)
+    train_parser.add_argument("--adjustment-interval", type=int, default=None)
+    train_parser.add_argument("--stagnation-switch-interval", type=int, default=None)
+    train_parser.add_argument("--stagnation-termination", type=int, default=None)
+    train_parser.add_argument("--min-basic-complexity", type=float, default=None)
+    train_parser.add_argument("--curriculum-stages", nargs="+", default=None,
+                              choices=["basic","doors","buttons","complex"])
+    # ---------- train command ----------
 
-    test_parser.add_argument('--complexities',
-                            nargs='+',
-                            type=float,
-                            default=[0.0, 0.25, 0.5, 0.75, 1.0],
-                            help='Complexity levels to test (space-separated)'
-                    )
+    # ---------- test command ----------
+    test_parser = subparsers.add_parser("test", help="Test a trained model or play manually")
 
-    test_parser.add_argument('--stages',
-                        nargs='+',
-                        choices=["basic", "doors", "buttons", "complex"],
-                        default=["basic", "doors", "buttons", "complex"],
-                        help='Task classes to test (space-separated)'
-                    )
+    test_parser.add_argument("--model", type=str, default=None, help="Path to trained model (required unless --play)")
+    test_parser.add_argument("--play", action="store_true", help="Human play mode (no model needed)")
+    test_parser.add_argument("--episodes", required=True, type=int)
+    test_parser.add_argument("--visualize", action="store_true", default=False)
+    test_parser.add_argument("--save-video", action="store_true", default=False)
+    # ---------- test command ----------
 
-    test_parser.add_argument("--play",
-                        action="store_true",
-                        help="Human play mode - control agent with keyboard instead of using a model"
-                    )
+    for general_parser in [train_parser, test_parser]:
+        general_parser.add_argument("--dynamic-complexity", action="store_true", help="Test across all stages and complexities")
+        
+        # Optional filters for dynamic testing
+        general_parser.add_argument("--complexities", nargs="+", type=float, default=[0.0,0.25,0.5,0.75,1.0])
+        general_parser.add_argument("--stages", nargs="+", choices=["basic","doors","buttons","complex"],
+                                default=["basic","doors","buttons","complex"])
+
+        general_parser.add_argument("--task-class", type=str, choices=["basic","doors","buttons","complex"], default=None)
+        general_parser.add_argument("--complexity-level", type=float, default=None)
+        general_parser.add_argument("--n-doors", type=int, default=None)
+        general_parser.add_argument("--n-buttons-per-door", type=int, choices=[0,1,2,3,4], default=None)
+        general_parser.add_argument("--button-break-probability", type=float, default=None)
 
 
-    # Benchmark command
+
+
+    """
+    # ---------- benchmark command ----------
     bench_parser = subparsers.add_parser("benchmark", help="Benchmark models")
-    bench_parser.add_argument("--models-dir", 
-                        type=str, 
-                        default="models",
-                        help="Directory containing models"
-                    )
-    bench_parser.add_argument("--benchmark-episodes", 
-                        type=int, 
-                        default=20,
-                        help="Episodes per model"
-                    )
-    bench_parser.add_argument("--output-dir", 
-                        type=str, 
-                        default="results/benchmarks",
-                        help="Output directory for results"
-                    )
-    
-    # Environment complexity parameters for benchmark
-    bench_parser.add_argument("--task-class",
-                        type=str,
-                        choices=["basic", "doors", "buttons", "complex"],
-                        default="basic",
-                        help="Task class for benchmarking"
-                    )
-    bench_parser.add_argument("--complexity-level",
-                        type=float,
-                        default=0.0,
-                        help="Complexity level (0.0 to 1.0)"
-                    )
-    bench_parser.add_argument("--n-doors",
-                        type=int,
-                        default=0,
-                        help="Number of doors in environment"
-                    )
-    bench_parser.add_argument("--n-buttons-per-door",
-                        type=int,
-                        default=1,
-                        choices=[0, 1, 2, 3, 4],
-                        help="Buttons per door"
-                    )
-    
-    # Visualize command
+    bench_parser.add_argument("--models-dir", required=True, type=str)
+    bench_parser.add_argument("--benchmark-episodes", required=True, type=int)
+    bench_parser.add_argument("--output-dir", required=True, type=str)
+    bench_parser.add_argument("--task-class", required=True, choices=["basic","doors","buttons","complex"])
+    bench_parser.add_argument("--complexity-level", required=True, type=float)
+    bench_parser.add_argument("--n-doors", required=True, type=int)
+    bench_parser.add_argument("--n-buttons-per-door", required=True, type=int, choices=[0,1,2,3,4])
+    bench_parser.add_argument("--door-periodic", action="store_true")
+    bench_parser.add_argument("--button-break-probability", required=True, type=float)
+
+    # ---------- visualize command ----------
     viz_parser = subparsers.add_parser("visualize", help="Visualize model performance")
-    viz_parser.add_argument("--model", 
-                        type=str, 
-                        required=True,
-                        help="Path to model"
-                    )
-    viz_parser.add_argument("--episodes", 
-                        type=int, 
-                        default=3,
-                        help="Number of episodes to visualize"
-                    )
-    viz_parser.add_argument("--save-video", 
-                        action="store_true",
-                        help="Save visualization as video"
-                    )
-    viz_parser.add_argument("--save-gif", 
-                        action="store_true",
-                        help="Save as GIF"
-                    )
-    
-    # Environment complexity parameters for visualize
-    viz_parser.add_argument("--task-class",
-                        type=str,
-                        choices=["basic", "doors", "buttons", "complex"],
-                        default="basic",
-                        help="Task class for visualization"
-                    )
-    viz_parser.add_argument("--complexity-level",
-                        type=float,
-                        default=0.0,
-                        help="Complexity level (0.0 to 1.0)"
-                    )
-    viz_parser.add_argument("--n-doors",
-                        type=int,
-                        default=0,
-                        help="Number of doors in environment"
-                    )
-    
-    # Compare command
+    viz_parser.add_argument("--model", required=True, type=str)
+    viz_parser.add_argument("--episodes", required=True, type=int)
+    viz_parser.add_argument("--save-video", action="store_true")
+    viz_parser.add_argument("--save-gif", action="store_true")
+    viz_parser.add_argument("--task-class", required=True, choices=["basic","doors","buttons","complex"])
+    viz_parser.add_argument("--complexity-level", required=True, type=float)
+    viz_parser.add_argument("--n-doors", required=True, type=int)
+    viz_parser.add_argument("--n-buttons-per-door", required=True, type=int, choices=[0,1,2,3,4])
+    viz_parser.add_argument("--door-periodic", action="store_true")
+    viz_parser.add_argument("--button-break-probability", required=True, type=float)
+
+    # ---------- compare command ----------
     compare_parser = subparsers.add_parser("compare", help="Compare architectures")
-    compare_parser.add_argument("--architectures", 
-                        nargs="+",
-                        default=["lstm", "transformer", "multimemory"],
-                        help="Architectures to compare"
-                    )
-    compare_parser.add_argument("--epochs", 
-                        type=int, 
-                        default=5000,
-                        help="Training epochs per architecture"
-                    )
-    compare_parser.add_argument("--trials", 
-                        type=int, 
-                        default=3,
-                        help="Number of trials per architecture"
-                    )
-    compare_parser.add_argument("--output-dir", 
-                        type=str, 
-                        default="results/comparisons",
-                        help="Output directory"
-                    )
+    compare_parser.add_argument("--architectures", nargs="+", required=True,
+                                choices=["lstm","transformer","multimemory"])
+    compare_parser.add_argument("--epochs", required=True, type=int)
+    compare_parser.add_argument("--trials", required=True, type=int)
+    compare_parser.add_argument("--output-dir", required=True, type=str)
+    compare_parser.add_argument("--task-class", required=True, choices=["basic","doors","buttons","complex"])
+    compare_parser.add_argument("--complexity-level", required=True, type=float)
+
+    """
+
+    args = parser.parse_args()
+
+    # ---------- Post‑processing validation ----------
+
+    required_env = []
+
+    if bool(args.dynamic_complexity) == bool(args.task_class):
+        raise "either use dynamic_complexity or choose task_class"
     
-    # Environment complexity parameters for compare
-    compare_parser.add_argument("--task-class",
-                        type=str,
-                        choices=["basic", "doors", "buttons", "complex"],
-                        default="basic",
-                        help="Task class for comparison"
-                    )
-    compare_parser.add_argument("--complexity-level",
-                        type=float,
-                        default=0.0,
-                        help="Complexity level (0.0 to 1.0)"
-                    )
+    if bool(args.dynamic_complexity) == bool(args.complexity_level):
+        raise "either use dynamic_complexity or choose complexity_level"
     
-    return parser.parse_args()
+    if bool(args.dynamic_complexity) and bool(any([args.n_doors, args.n_buttons_per_door, args.button_break_probability])):
+        raise "either use dynamic_complexity or choose door and button parameters"
+
+
+    elif args.command == "test":
+        if bool(args.play) == bool(args.model):
+            raise "either play as human or choose model"
+        
+    if args.task_class:
+        required_env.extend(["complexity_level"])
+       
+
+
+    missing = [p for p in required_env if getattr(args, p) is None]
+    if missing:
+        parser.error(f"Additional parameters are required: {', '.join(missing)}")
+
+
+
+    defaults = {}
+
+    if args.dynamic_complexity:
+        defaults.update({
+            "performance_window": 100,
+            "complexity_increase_threshold": 0.95,
+            "complexity_decrease_threshold": 0.7,
+            "complexity_step": 0.05,
+            "min_complexity": 0.0,
+            "max_complexity": 1.0,
+            "adjustment_interval": 500,
+            "stagnation_switch_interval": 1000,
+            "stagnation_termination": 5000,
+            "min_basic_complexity": 0.2,
+            "curriculum_stages": ["basic", "doors", "buttons", "complex"],
+        })
+
+    if args.command == "train":
+        defaults.update({
+            "optimizer": "adam",
+        })
+
+    #defaults = {
+    #    "performance_window": 100,
+    #    "complexity_increase_threshold": 0.95,
+    #    "complexity_decrease_threshold": 0.7,
+    #    "complexity_step": 0.05,
+    #    "min_complexity": 0.0,
+    #    "max_complexity": 1.0,
+    #    "adjustment_interval": 500,
+    #    "stagnation_switch_interval": 1000,
+    #    "stagnation_termination": 5000,
+    #    "min_basic_complexity": 0.2,
+    #    "curriculum_stages": ["basic", "doors", "buttons", "complex"],
+    #}
+
+    # Iterate over each argument and assign default if None
+    for arg_name, default_value in defaults.items():
+        if getattr(args, arg_name, None) is None:
+            setattr(args, arg_name, default_value)
+            print(f"Warning: --{arg_name.replace('_', '-')} was None, setting to default {default_value}")
+
+    # For benchmark and visualize, we keep required=True for environment parameters as before.
+
+    return args

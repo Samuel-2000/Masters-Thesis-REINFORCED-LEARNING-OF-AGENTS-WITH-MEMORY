@@ -74,7 +74,6 @@ class DetailedProfiler:
                 'door_close_duration': 20,
                 'n_buttons_per_door': self.args.n_buttons_per_door,
                 'button_break_probability': 0.0,
-                'door_periodic': False
             },
             'model': {
                 'type': self.args.network_type,

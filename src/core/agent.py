@@ -174,13 +174,13 @@ class Agent:
         config = checkpoint.get('config', {})
         
         # Get network type, default to 'lstm' for backward compatibility
-        network_type = config.get('network_type', 'lstm')
+        network_type = config['network_type']
         
         # Use constants for sizes (override any saved values for consistency)
         observation_size = OBSERVATION_SIZE
         action_size = ACTION_SIZE
-        hidden_size = config.get('hidden_size', 512)
-        use_auxiliary = config.get('use_auxiliary', False)
+        hidden_size = config['hidden_size']
+        use_auxiliary = config['use_auxiliary']
         
         # Create agent with consistent sizes
         agent = cls(
