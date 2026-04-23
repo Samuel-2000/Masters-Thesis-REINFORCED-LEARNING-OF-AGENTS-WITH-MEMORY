@@ -35,6 +35,10 @@ def parse_args():
     train_parser.add_argument("--epochs", required=True, type=int)
     train_parser.add_argument("--batch-size", required=True, type=int)
     train_parser.add_argument("--lr", required=True, type=float)
+    train_parser.add_argument("--optimizer", type=str, default=None)
+    train_parser.add_argument("--weight-decay", type=float, default=None)
+
+    
     train_parser.add_argument("--auxiliary-tasks", action="store_true", default=False)
 
     train_parser.add_argument("--save-dir", type=str, default="models", help="Directory to save models")
@@ -171,6 +175,7 @@ def parse_args():
     if args.command == "train":
         defaults.update({
             "optimizer": "adam",
+            "weight_decay": 0.0
         })
 
     #defaults = {
