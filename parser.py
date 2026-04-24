@@ -78,7 +78,7 @@ def parse_args():
                                 default=["basic","doors","buttons","complex"])
 
         general_parser.add_argument("--task-class", type=str, choices=["basic","doors","buttons","complex"], default=None)
-        general_parser.add_argument("--complexity-level", type=float, default=None)
+        general_parser.add_argument("--complexity-level", type=float, default=0.0)
         general_parser.add_argument("--n-doors", type=int, default=None)
         general_parser.add_argument("--n-buttons-per-door", type=int, choices=[0,1,2,3,4], default=None)
         general_parser.add_argument("--button-break-probability", type=float, default=None)

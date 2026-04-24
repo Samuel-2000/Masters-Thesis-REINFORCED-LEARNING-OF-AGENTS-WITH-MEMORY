@@ -24,6 +24,10 @@ from .optimizers import GradientClipper, LearningRateScheduler
 import cv2
 
 
+# ============================================================================
+# DYNAMIC COMPLEXITY MANAGER
+# ============================================================================
+
 class ComplexityManager:
     """Manages dynamic complexity adjustment based on agent performance"""
     
@@ -354,10 +358,9 @@ class ComplexityManager:
         }
 
 
-
-
-
-
+# ============================================================================
+# BASE TRAINER (NO DYNAMIC COMPLEXITY)
+# ============================================================================
 
 class ParallelTrainer:
     """Base trainer with parallel execution, fixed environment (no dynamic complexity)"""
@@ -461,13 +464,14 @@ class ParallelTrainer:
         
         agent = Agent(
             network_type=model_config['type'],
-            observation_size=10,
-            action_size=6,
+            observation_size=10,  # Fixed observation size
+            action_size=6,  # Fixed action size
             hidden_size=model_config['hidden_size'],
             use_auxiliary=model_config['use_auxiliary'],
             device=self.device
         )
         
+        # Load pretrained if specified
         if 'pretrained_path' in model_config:
             agent.load(model_config['pretrained_path'])
         
@@ -476,6 +480,7 @@ class ParallelTrainer:
     def _create_optimizer(self) -> optim.Optimizer:
         """Create optimizer"""
         training_config = self.config['training']
+        
         optimizer_type = training_config['optimizer']
         lr = training_config['learning_rate']
         weight_decay = training_config['weight_decay']
@@ -498,58 +503,85 @@ class ParallelTrainer:
             raise ValueError(f"Unknown optimizer: {optimizer_type}")
     
     def _collect_experiences_parallel(self) -> Dict[str, torch.Tensor]:
-        """Collect experiences in parallel across all environments"""
+        """
+        Collect experiences in parallel across all environments
+        """
         max_steps = self.vector_env.envs[0].max_steps
-        self.agent.reset()
+        self.agent.reset()  # Reset network state once
         
+        # Reset all environments
         obs_array, _ = self.vector_env.reset()
-        observations = torch.tensor(obs_array, dtype=torch.long).to(self.device)
-        observations = observations.unsqueeze(1)
         
+        # Convert to tensor
+        observations = torch.tensor(obs_array, dtype=torch.long).to(self.device)
+        observations = observations.unsqueeze(1)  # [B, 1, K]
+        
+        # Storage
         all_observations = []
         all_actions = []
         all_rewards = []
+        
+        # Run for max_steps or until all environments are done
         active_mask = torch.ones(self.batch_size, dtype=torch.bool, device=self.device)
         
         for step in range(max_steps):
+            # Store current observations
             all_observations.append(observations.clone())
             
+            # Get actions from network
             with torch.no_grad():
+                # Ensure network is in eval mode for inference
                 was_training = self.agent.network.training
                 self.agent.network.eval()
-                logits = self.agent.network(observations)
-                logits = logits.squeeze(1)
+                
+                logits = self.agent.network(observations)  # [B, 1, A]
+                logits = logits.squeeze(1)  # [B, A]
+                
                 if was_training:
                     self.agent.network.train()
                 
+                # Sample actions during training
                 if self.agent.network.training:
                     probs = torch.softmax(logits, dim=-1)
-                    actions = torch.multinomial(probs, 1).squeeze(-1)
+                    actions = torch.multinomial(probs, 1).squeeze(-1)  # [B]
                 else:
-                    actions = logits.argmax(dim=-1)
+                    actions = logits.argmax(dim=-1)  # [B]
             
+            # Convert to numpy for environment step
             actions_np = actions.cpu().numpy()
+            
+            # Step all environments in parallel
             obs_array, rewards, terminated, truncated, _ = self.vector_env.step(actions_np)
             
+            # Convert to tensors
             rewards_tensor = torch.tensor(rewards, dtype=torch.float32, device=self.device)
             terminated_tensor = torch.tensor(terminated, dtype=torch.bool, device=self.device)
             truncated_tensor = torch.tensor(truncated, dtype=torch.bool, device=self.device)
             
+            # Store actions and rewards
             all_actions.append(actions)
             all_rewards.append(rewards_tensor)
             
+            # Update active mask
             done_mask = terminated_tensor | truncated_tensor
             active_mask = active_mask & ~done_mask
+            
+            # Break if all environments are done
             if not active_mask.any():
                 break
             
+            # Prepare next observations
             observations = torch.tensor(obs_array, dtype=torch.long, device=self.device)
-            observations = observations.unsqueeze(1)
+            observations = observations.unsqueeze(1)  # [B, 1, K]
         
+        # Stack all collected data
         T = len(all_observations)
-        observations_tensor = torch.cat(all_observations, dim=1)
-        actions_tensor = torch.stack(all_actions, dim=1)
-        rewards_tensor = torch.stack(all_rewards, dim=1)
+        
+        observations_tensor = torch.cat(all_observations, dim=1)  # [B, T, K]
+        actions_tensor = torch.stack(all_actions, dim=1)  # [B, T]
+        rewards_tensor = torch.stack(all_rewards, dim=1)  # [B, T]
+        
+        # Create mask for valid steps
         mask = torch.ones_like(rewards_tensor, dtype=torch.float32)
         
         return {
@@ -559,39 +591,62 @@ class ParallelTrainer:
             'mask': mask
         }
     
-    def _compute_loss(self, experiences: Dict[str, torch.Tensor]) -> Tuple[torch.Tensor, Dict]:
-        """Compute policy loss (optionally with auxiliary)"""
+    def _compute_loss(self, 
+                     experiences: Dict[str, torch.Tensor]) -> Tuple[torch.Tensor, Dict]:
+        """Compute policy loss with auxiliary losses"""
         obs = experiences['observations']
         actions = experiences['actions']
         rewards = experiences['rewards']
         mask = experiences.get('mask', None)
         
+        # Reset network for batch processing
         self.agent.reset()
         
+        # Forward pass
         if self.aux_loss_fn and self.agent.use_auxiliary:
+            # Get outputs from network with auxiliary predictions
             outputs = self.agent.network(obs, return_auxiliary=True)
+            
             if isinstance(outputs, tuple):
                 if len(outputs) == 4:
                     logits, energy_pred, obs_pred, _ = outputs
                 else:
                     logits, energy_pred, obs_pred = outputs
             else:
+                # Network doesn't return auxiliary outputs
                 logits = outputs
-                energy_pred = obs_pred = None
+                energy_pred = None
+                obs_pred = None
             
-            policy_loss, entropy = self.policy_loss_fn(logits, actions, rewards, mask)
+            # Policy loss
+            policy_loss, entropy = self.policy_loss_fn(
+                logits, actions, rewards, mask
+            )
+            
             total_loss = policy_loss
+            
             metrics = {
                 'loss': policy_loss.item(),
                 'policy_loss': policy_loss.item(),
                 'entropy': entropy.item(),
                 'reward': rewards.sum(dim=1).mean().item()
             }
-            # Auxiliary loss would be added here if targets were collected
+            
+            # Add auxiliary loss if available
+            if energy_pred is not None and obs_pred is not None:
+                # Note: We don't have energy targets in basic implementation
+                # You'd need to collect these during experience collection
+                pass
+            
         else:
+            # Standard forward pass without auxiliary tasks
             logits = self.agent.network(obs)
-            policy_loss, entropy = self.policy_loss_fn(logits, actions, rewards, mask)
+            policy_loss, entropy = self.policy_loss_fn(
+                logits, actions, rewards, mask
+            )
+            
             total_loss = policy_loss
+            
             metrics = {
                 'loss': total_loss.item(),
                 'policy_loss': policy_loss.item(),
@@ -601,28 +656,34 @@ class ParallelTrainer:
         
         return total_loss, metrics
     
-    def _train_step(self, experiences: Dict[str, torch.Tensor]) -> Dict[str, float]:
+    def _train_step(self, 
+                   experiences: Dict[str, torch.Tensor]) -> Dict[str, float]:
         """Perform one training step"""
         self.agent.network.train()
+        
+        # Compute loss
         loss, metrics = self._compute_loss(experiences)
+        
+        # Optimization step
         self.optimizer.zero_grad()
         loss.backward()
         self.gradient_clipper.clip(self.agent.network.parameters())
         self.optimizer.step()
         
+        # Flush cache if using multi-memory
         if hasattr(self.agent.network, 'flush_cache_buffer'):
             self.agent.network.flush_cache_buffer()
         
         return metrics
     
-    
     def get_environment_config(self):
+        """Get the current environment configuration (static for base trainer)"""
         return self.config['environment'].copy()
     
-
     def _test_epoch(self, episodes: int = 10) -> Dict[str, float]:
         """Test agent on a fresh environment (same config as training)"""
         self.agent.network.eval()
+        
         total_reward = 0.0
         success_count = 0
         episode_lengths = []
@@ -635,6 +696,7 @@ class ParallelTrainer:
                 test_env = GridMazeWorld(**env_config)
                 obs, info = test_env.reset()
                 self.agent.reset()
+                
                 episode_reward = 0.0
                 steps = 0
                 terminated = truncated = False
@@ -642,11 +704,14 @@ class ParallelTrainer:
                 while not (terminated or truncated) and steps < test_env.max_steps:
                     action = self.agent.act(obs, training=False)
                     obs, reward, terminated, truncated, info = test_env.step(action)
+                    
                     episode_reward += reward
                     steps += 1
                 
-                total_reward += episode_reward
+                total_reward += episode_reward  # Use cumulative reward
                 episode_lengths.append(steps)
+                
+                # Consider episode successful if agent survives to end
                 if steps == test_env.max_steps:
                     success_count += 1
         
@@ -665,15 +730,22 @@ class ParallelTrainer:
         save_dir = Path(self.config['save_dir'])
         save_dir.mkdir(exist_ok=True)
         
+        # For 'best' and 'final', save the agent file
         if name in ['best', 'final']:
             agent_path = save_dir / f"{self.experiment_name}_{name}.pt"
-            torch.save({
+            
+            # Save additional complexity information
+            agent_state = {
                 'state_dict': self.agent.network.state_dict(),
                 'config': self.agent.network.get_config() if hasattr(self.agent.network, 'get_config') else {},
-            }, str(agent_path))
+            }
+            
+            torch.save(agent_state, str(agent_path))
             self.logger.info(f"Saved agent to {agent_path}")
         
+        # Save checkpoint (for resuming training)
         checkpoint_path = save_dir / f"{self.experiment_name}_{name}_checkpoint.pt"
+        
         checkpoint = {
             'epoch': len(self.metrics['train_rewards']),
             'optimizer_state': self.optimizer.state_dict(),
@@ -681,6 +753,7 @@ class ParallelTrainer:
             'metrics': self.metrics,
             'config': self.config
         }
+        
         torch.save(checkpoint, str(checkpoint_path))
         self.logger.info(f"Saved checkpoint to {checkpoint_path}")
     
@@ -688,60 +761,87 @@ class ParallelTrainer:
         """Save training metrics"""
         metrics_dir = Path('logs/metrics')
         metrics_dir.mkdir(parents=True, exist_ok=True)
+        
         metrics_path = metrics_dir / f"{self.experiment_name}_metrics.npz"
+        
         np.savez(str(metrics_path),
                 train_rewards=self.metrics['train_rewards'],
                 train_losses=self.metrics['train_losses'],
                 test_rewards=self.metrics['test_rewards'],
                 timing_collection=self.metrics['timing']['collection'],
                 timing_training=self.metrics['timing']['training'])
+        
+        # Plot metrics
         self._plot_metrics()
     
     def _plot_metrics(self):
-        """Basic training plots"""
+        """Plot training metrics"""
         import matplotlib.pyplot as plt
+        
         fig, axes = plt.subplots(2, 2, figsize=(12, 10))
         
+        # 1. Raw and smoothed rewards
         ax = axes[0, 0]
         rewards = self.metrics['train_rewards']
-        ax.plot(rewards, alpha=0.3, color='gray')
+        ax.plot(rewards, alpha=0.3, color='gray', linewidth=0.5, label='Raw')
+        
+        # Add smoothed line
         if len(rewards) >= 100:
             window = 100
             smoothed = np.convolve(rewards, np.ones(window)/window, mode='valid')
-            ax.plot(range(window-1, len(rewards)), smoothed, 'r-', linewidth=2)
+            ax.plot(range(window-1, len(rewards)), smoothed, 
+                   'r-', linewidth=2, label=f'Smoothed (window={window})')
+        
         ax.set_title('Training Rewards')
-        ax.grid(True)
+        ax.set_xlabel('Epoch')
+        ax.set_ylabel('Reward')
+        ax.grid(True, alpha=0.3)
+        ax.legend()
         
+        # 2. Training losses
         ax = axes[0, 1]
-        ax.plot(self.metrics['train_losses'], alpha=0.7)
+        ax.plot(self.metrics['train_losses'], alpha=0.7, linewidth=1)
         ax.set_title('Training Losses')
-        ax.grid(True)
+        ax.set_xlabel('Epoch')
+        ax.set_ylabel('Loss')
+        ax.grid(True, alpha=0.3)
         
+        # 3. Test rewards
         if self.metrics['test_rewards']:
             ax = axes[1, 0]
             test_rewards = self.metrics['test_rewards']
             test_interval = len(self.metrics['train_rewards']) // len(test_rewards)
             x_vals = np.arange(test_interval, len(test_rewards)*test_interval + 1, test_interval)
-            ax.plot(x_vals, test_rewards, 'o-')
+            ax.plot(x_vals, test_rewards, 'o-', linewidth=2, markersize=6)
             ax.set_title('Test Rewards')
-            ax.grid(True)
+            ax.set_xlabel('Epoch')
+            ax.set_ylabel('Reward')
+            ax.grid(True, alpha=0.3)
         
+        # 4. Summary statistics
         ax = axes[1, 1]
         ax.axis('off')
+        
         summary = [
             f"Experiment: {self.experiment_name}",
             f"Best reward: {self.metrics['best_reward']:.2f}",
             f"Total epochs: {len(self.metrics['train_rewards'])}",
         ]
-        ax.text(0.1, 0.9, "\n".join(summary), transform=ax.transAxes, fontfamily='monospace')
+        
+        ax.text(0.1, 0.9, "\n".join(summary), transform=ax.transAxes, fontsize=11,
+               verticalalignment='top', fontfamily='monospace',
+               bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
         
         plt.tight_layout()
+        
         plot_path = Path('results/plots') / f"{self.experiment_name}_metrics.png"
-        plt.savefig(str(plot_path), dpi=150)
+        plt.savefig(str(plot_path), dpi=150, bbox_inches='tight')
         plt.close()
+        
+        self.logger.info(f"Saved metrics plot to {plot_path}")
     
     def _print_training_summary(self, start_time: float):
-        """Print summary"""
+        """Print training summary"""
         total_time = time.time() - start_time
         avg_collection = np.mean(self.metrics['timing']['collection'])
         avg_training = np.mean(self.metrics['timing']['training'])
@@ -749,10 +849,11 @@ class ParallelTrainer:
         print(f"\n{'='*80}")
         print("TRAINING SUMMARY")
         print(f"{'='*80}")
-        print(f"Total time: {total_time:.1f}s ({total_time/60:.1f} min)")
-        print(f"Avg epoch: {avg_collection+avg_training:.3f}s (collect: {avg_collection:.3f}s, train: {avg_training:.3f}s)")
-        print(f"Best reward: {self.metrics['best_reward']:.2f}")
-        print(f"Model: {self.experiment_name}_best.pt")
+        print(f"Total training time: {total_time:.1f}s ({total_time/60:.1f} minutes)")
+        print(f"Average epoch time: {avg_collection+avg_training:.3f}s (collection: {avg_collection:.3f}s, training: {avg_training:.3f}s)")
+        print(f"Average environment steps per second: {self.batch_size/avg_collection:.1f}")
+        print(f"Final best reward: {self.metrics['best_reward']:.2f}")
+        print(f"Model saved as: {self.experiment_name}_best.pt")
         print(f"{'='*80}")
     
     def train(self):
@@ -790,7 +891,7 @@ class ParallelTrainer:
                 if test_reward > self.metrics['best_reward']:
                     self.metrics['best_reward'] = test_reward
                     self._save_model('best')
-                    self.logger.info(f"New best model: {test_reward:.2f}")
+                    self.logger.info(f"New best model with reward: {test_reward:.2f}")
             
             if epoch % save_interval == 0 and epoch != 0:
                 self._save_model(f'epoch_{epoch:06d}')
@@ -823,9 +924,6 @@ class ParallelTrainer:
             wandb.finish()
 
 
-
-
-
 # ============================================================================
 # ADAPTIVE TRAINER (inherits from ParallelTrainer)
 # ============================================================================
@@ -836,10 +934,11 @@ class AdaptiveParallelTrainer(ParallelTrainer):
     def __init__(self, config: Dict[str, Any], use_wandb: bool = False):
         # Mark dynamic in experiment name
         config['training']['dynamic_complexity'] = True  # ensure flag set
-        super().__init__(config, use_wandb)
-        
         # Create complexity manager
         self.complexity_manager = ComplexityManager(config)
+        
+        super().__init__(config, use_wandb)
+        
         
         # Override initial environment to use manager's config
         self.vector_env = self._create_vectorized_env()
@@ -853,8 +952,9 @@ class AdaptiveParallelTrainer(ParallelTrainer):
         self.logger.info(f"Dynamic complexity enabled: {self.complexity_manager.get_status()}")
     
     def get_environment_config(self):
+        """Get dynamic environment configuration from complexity manager"""
         return self.complexity_manager.get_environment_config()
-
+    
     def _create_vectorized_env(self) -> VectorizedMazeEnv:
         """Create environment using complexity manager's current config"""
         env_config = self.get_environment_config()
@@ -880,123 +980,48 @@ class AdaptiveParallelTrainer(ParallelTrainer):
             abs(adjustment['old_complexity'] - adjustment['new_complexity']) > 0.01):
             self._recreate_vectorized_env()
     
-    def train(self):
-        """Training loop with dynamic complexity adjustments"""
-        training_config = self.config['training']
-        epochs = training_config['epochs']
-        save_interval = training_config['save_interval']
-        test_interval = training_config['test_interval']
+    def _test_epoch(self, episodes: int = 10) -> Dict[str, float]:
+        """Test agent on environment matching current dynamic complexity"""
+        self.agent.network.eval()
         
-        print("\n🎮 Dynamic Complexity Training Controls:")
-        print("  Press 'v' to visualize current environments")
-        print("  Press 'q' to stop training early")
-        print("=" * 50)
+        total_reward = 0.0
+        success_count = 0
+        episode_lengths = []
         
-        cv2.namedWindow('Training Controls', cv2.WINDOW_NORMAL)
-        cv2.resizeWindow('Training Controls', 400, 100)
-        dummy = np.zeros((100, 400, 3), dtype=np.uint8)
-        cv2.putText(dummy, "Press 'v' to visualize", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,255,255),2)
-        cv2.putText(dummy, "Press 'q' to quit", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,255,255),2)
-        cv2.imshow('Training Controls', dummy)
-        cv2.waitKey(1)
+        env_config = self.get_environment_config()
+        env_config['render_size'] = 0
         
-        pbar = tqdm(range(epochs), desc="Training", unit="epoch")
-        start_time = time.time()
+        with torch.no_grad():
+            for _ in range(episodes):
+                test_env = GridMazeWorld(**env_config)
+                obs, info = test_env.reset()
+                self.agent.reset()
+                
+                episode_reward = 0.0
+                steps = 0
+                terminated = truncated = False
+                
+                while not (terminated or truncated) and steps < test_env.max_steps:
+                    action = self.agent.act(obs, training=False)
+                    obs, reward, terminated, truncated, info = test_env.step(action)
+                    
+                    episode_reward += reward
+                    steps += 1
+                
+                total_reward += episode_reward
+                episode_lengths.append(steps)
+                if steps == test_env.max_steps:
+                    success_count += 1
         
-        for epoch in pbar:
-            key = cv2.waitKey(1) & 0xFF
-            if key == ord('v'):
-                self._visualize_current_environments(epoch)
-                cv2.imshow('Training Controls', dummy)
-            elif key == ord('q'):
-                print("\n⚠️ Early stop requested.")
-                self._save_model('interrupted')
-                cv2.destroyAllWindows()
-                break
-            
-            epoch_start = time.time()
-            coll_start = time.time()
-            experiences = self._collect_experiences_parallel()
-            coll_time = time.time() - coll_start
-            
-            train_start = time.time()
-            train_metrics = self._train_step(experiences)
-            train_time = time.time() - train_start
-            
-            epoch_reward = train_metrics['reward']
-            
-            # Update complexity manager
-            self.complexity_manager.add_performance(epoch_reward, epoch)
-            adjustment = self.complexity_manager.adjust_complexity(epoch)
-            if adjustment:
-                self._handle_complexity_adjustment(adjustment, epoch)
-            
-            # Store metrics
-            self.metrics['train_rewards'].append(epoch_reward)
-            self.metrics['train_losses'].append(train_metrics['loss'])
-            self.metrics['timing']['collection'].append(coll_time)
-            self.metrics['timing']['training'].append(train_time)
-            self.metrics['timing']['total'].append(time.time() - epoch_start)
-            self.metrics['complexity_history'].append(self.complexity_manager.get_current_complexity())
-            self.metrics['task_class_history'].append(self.complexity_manager.get_current_task_class())
-            self.metrics['performance_scores'].append(self.complexity_manager.calculate_performance_score())
-            
-            if epoch % test_interval == 0 and epoch != 0:
-                test_metrics = self._test_epoch(episodes=10)
-                test_reward = test_metrics['reward']
-                self.metrics['test_rewards'].append(test_reward)
-                if test_reward > self.metrics['best_reward']:
-                    self.metrics['best_reward'] = test_reward
-                    self._save_model('best')
-                    self.logger.info(f"New best model: {test_reward:.2f}")
-            
-            if epoch % save_interval == 0 and epoch != 0:
-                self._save_model(f'epoch_{epoch:06d}')
-            
-            avg_coll = np.mean(self.metrics['timing']['collection'][-10:]) if self.metrics['timing']['collection'] else coll_time
-            avg_train = np.mean(self.metrics['timing']['training'][-10:]) if self.metrics['timing']['training'] else train_time
-            
-            pbar.set_postfix({
-                'reward': f"{epoch_reward:.2f}",
-                'loss': f"{train_metrics['loss']:.4f}",
-                'best': f"{self.metrics['best_reward']:.2f}",
-                'stage': self.complexity_manager.get_current_task_class(),
-                'comp': f"{self.complexity_manager.get_current_complexity():.2f}",
-                'perf': f"{self.complexity_manager.calculate_performance_score():.2f}",
-                'adj': self.complexity_manager.adjustments_made,
-                'eps/s': f"{self.batch_size/(avg_coll+avg_train):.1f}",
-            })
-            
-            if self.use_wandb:
-                wandb.log({
-                    'train/reward': epoch_reward,
-                    'train/loss': train_metrics['loss'],
-                    'lr': self.lr_scheduler.get_lr(),
-                    'complexity/current': self.complexity_manager.get_current_complexity(),
-                    'complexity/stage': self._stage_to_numeric(self.complexity_manager.get_current_task_class()),
-                    'complexity/performance_score': self.complexity_manager.calculate_performance_score(),
-                })
-                if adjustment:
-                    wandb.log({
-                        'complexity/adjustment_action': adjustment.get('action', 'none'),
-                        'complexity/old_complexity': adjustment.get('old_complexity', 0.0),
-                        'complexity/new_complexity': adjustment.get('new_complexity', 0.0),
-                    })
-                if epoch % test_interval == 0 and epoch != 0:
-                    wandb.log({'test/reward': test_metrics['reward']})
-            
-            self.lr_scheduler.step()
+        avg_reward = total_reward / episodes
+        success_rate = success_count / episodes * 100
+        avg_length = np.mean(episode_lengths)
         
-        self._save_model('final')
-        self._save_metrics()
-        self._print_training_summary(start_time)
-        if self.use_wandb:
-            wandb.finish()
-    
-    def _stage_to_numeric(self, stage: str) -> float:
-        """Convert stage name to numeric for logging"""
-        stage_map = {"basic": 0.0, "doors": 0.33, "buttons": 0.66, "complex": 1.0}
-        return stage_map.get(stage, 0.0)
+        return {
+            'reward': avg_reward,
+            'success_rate': success_rate,
+            'avg_length': avg_length
+        }
     
     def _visualize_current_environments(self, epoch: int):
         """Visualize a sample of current training environments"""
@@ -1040,6 +1065,16 @@ class AdaptiveParallelTrainer(ParallelTrainer):
         cv2.imshow('Training Visualization', combined)
         cv2.waitKey(0)
     
+    def _stage_to_numeric(self, stage: str) -> float:
+        """Convert stage name to numeric value for logging"""
+        stage_map = {
+            "basic": 0.0,
+            "doors": 0.33,
+            "buttons": 0.66,
+            "complex": 1.0
+        }
+        return stage_map.get(stage, 0.0)
+    
     def _save_model(self, name: str):
         """Override to include complexity status"""
         save_dir = Path(self.config['save_dir'])
@@ -1047,7 +1082,9 @@ class AdaptiveParallelTrainer(ParallelTrainer):
         
         if name in ['best', 'final']:
             agent_path = save_dir / f"{self.experiment_name}_{name}.pt"
-            torch.save({
+            
+            # Save additional complexity information
+            agent_state = {
                 'state_dict': self.agent.network.state_dict(),
                 'config': self.agent.network.get_config() if hasattr(self.agent.network, 'get_config') else {},
                 'complexity_status': self.complexity_manager.get_status(),
@@ -1057,10 +1094,14 @@ class AdaptiveParallelTrainer(ParallelTrainer):
                     'current_complexity': self.complexity_manager.get_current_complexity(),
                     'current_task_class': self.complexity_manager.get_current_task_class()
                 }
-            }, str(agent_path))
+            }
+            
+            torch.save(agent_state, str(agent_path))
             self.logger.info(f"Saved agent to {agent_path}")
         
+        # Save checkpoint (for resuming training)
         checkpoint_path = save_dir / f"{self.experiment_name}_{name}_checkpoint.pt"
+        
         checkpoint = {
             'epoch': len(self.metrics['train_rewards']),
             'optimizer_state': self.optimizer.state_dict(),
@@ -1075,6 +1116,7 @@ class AdaptiveParallelTrainer(ParallelTrainer):
             },
             'config': self.config
         }
+        
         torch.save(checkpoint, str(checkpoint_path))
         self.logger.info(f"Saved checkpoint to {checkpoint_path}")
     
@@ -1082,8 +1124,12 @@ class AdaptiveParallelTrainer(ParallelTrainer):
         """Override to include complexity history"""
         metrics_dir = Path('logs/metrics')
         metrics_dir.mkdir(parents=True, exist_ok=True)
+        
         metrics_path = metrics_dir / f"{self.experiment_name}_metrics.npz"
+        
+        # Convert task class history to numeric for saving
         task_class_numeric = [self._stage_to_numeric(stage) for stage in self.metrics['task_class_history']]
+        
         np.savez(str(metrics_path),
                 train_rewards=self.metrics['train_rewards'],
                 train_losses=self.metrics['train_losses'],
@@ -1093,6 +1139,8 @@ class AdaptiveParallelTrainer(ParallelTrainer):
                 performance_scores=self.metrics['performance_scores'],
                 timing_collection=self.metrics['timing']['collection'],
                 timing_training=self.metrics['timing']['training'])
+        
+        # Plot metrics
         self._plot_metrics()
     
     def _plot_metrics(self):
@@ -1220,21 +1268,267 @@ class AdaptiveParallelTrainer(ParallelTrainer):
         
         self.logger.info(f"Saved metrics plot to {plot_path}")
     
+    def _create_complexity_progression_plot(self):
+        """Create a detailed complexity progression plot"""
+        import matplotlib.pyplot as plt
+        
+        fig = plt.figure(figsize=(12, 10))
+        
+        # Create 4 subplots
+        ax1 = plt.subplot(3, 2, 1)
+        ax2 = plt.subplot(3, 2, 2)
+        ax3 = plt.subplot(3, 2, 3)
+        ax4 = plt.subplot(3, 2, 4)
+        ax5 = plt.subplot(3, 2, (5, 6))
+        
+        # 1. Complexity progression
+        ax1.plot(self.metrics['complexity_history'], 'b-', linewidth=2)
+        ax1.set_title('Complexity Level Over Time')
+        ax1.set_xlabel('Epoch')
+        ax1.set_ylabel('Complexity')
+        ax1.set_ylim([0, 1.1])
+        ax1.grid(True, alpha=0.3)
+        
+        # Mark adjustment points
+        adjustments = []
+        for i in range(1, len(self.metrics['complexity_history'])):
+            if abs(self.metrics['complexity_history'][i] - self.metrics['complexity_history'][i-1]) > 0.01:
+                adjustments.append(i)
+        
+        if adjustments:
+            ax1.scatter(adjustments, [self.metrics['complexity_history'][i] for i in adjustments],
+                       color='red', s=50, zorder=5, label='Adjustments')
+            ax1.legend()
+        
+        # 2. Task class progression
+        task_class_numeric = [self._stage_to_numeric(stage) for stage in self.metrics['task_class_history']]
+        ax2.plot(task_class_numeric, 'g-', linewidth=2)
+        ax2.set_title('Task Class Progression')
+        ax2.set_xlabel('Epoch')
+        ax2.set_ylabel('Task Class')
+        ax2.set_yticks([0.0, 0.33, 0.66, 1.0])
+        ax2.set_yticklabels(['Basic', 'Doors', 'Buttons', 'Complex'])
+        ax2.set_ylim([-0.1, 1.1])
+        ax2.grid(True, alpha=0.3)
+        
+        # 3. Performance scores
+        ax3.plot(self.metrics['performance_scores'], 'orange', linewidth=2)
+        ax3.axhline(y=self.complexity_manager.increase_threshold, 
+                   color='green', linestyle='--', alpha=0.7, label='Increase threshold')
+        ax3.axhline(y=self.complexity_manager.decrease_threshold,
+                   color='red', linestyle='--', alpha=0.7, label='Decrease threshold')
+        ax3.set_title('Performance Scores')
+        ax3.set_xlabel('Epoch')
+        ax3.set_ylabel('Score')
+        ax3.set_ylim([0, 1.1])
+        ax3.grid(True, alpha=0.3)
+        ax3.legend(fontsize=9)
+        
+        # 4. Reward vs Complexity phase
+        window = min(50, len(self.metrics['train_rewards']) // 10)
+        if window > 1:
+            smoothed_rewards = np.convolve(self.metrics['train_rewards'], 
+                                          np.ones(window)/window, mode='valid')
+            smoothed_complexity = np.convolve(self.metrics['complexity_history'],
+                                            np.ones(window)/window, mode='valid')
+            
+            min_len = min(len(smoothed_rewards), len(smoothed_complexity))
+            sc = ax4.scatter(smoothed_complexity[:min_len], smoothed_rewards[:min_len],
+                           c=range(min_len), cmap='viridis', alpha=0.7, s=30)
+            ax4.set_title('Reward vs Complexity (Smoothed)')
+            ax4.set_xlabel('Complexity Level')
+            ax4.set_ylabel('Reward')
+            ax4.grid(True, alpha=0.3)
+            plt.colorbar(sc, ax=ax4, label='Epoch (smoothed)')
+        
+        # 5. Combined view
+        epochs = range(len(self.metrics['train_rewards']))
+        color_map = plt.cm.viridis
+        
+        # Plot rewards (scaled)
+        scaled_rewards = np.array(self.metrics['train_rewards'])
+        if scaled_rewards.max() > scaled_rewards.min():
+            scaled_rewards = (scaled_rewards - scaled_rewards.min()) / (scaled_rewards.max() - scaled_rewards.min())
+        
+        ax5.plot(epochs, scaled_rewards, 'b-', alpha=0.5, linewidth=1, label='Reward (scaled)')
+        ax5.plot(epochs, self.metrics['complexity_history'], 'r-', linewidth=2, label='Complexity')
+        ax5.plot(epochs, task_class_numeric, 'g--', linewidth=1.5, label='Task Class')
+        
+        # Fill between for task classes
+        for i, stage in enumerate(["basic", "doors", "buttons", "complex"]):
+            numeric_value = self._stage_to_numeric(stage)
+            if numeric_value in task_class_numeric:
+                # Find epochs where this stage is active
+                stage_epochs = [j for j, val in enumerate(task_class_numeric) if val == numeric_value]
+                if stage_epochs:
+                    start = min(stage_epochs)
+                    end = max(stage_epochs)
+                    ax5.axvspan(start, end, alpha=0.1, color=color_map(i/4))
+                    ax5.text((start+end)/2, 1.05, stage, 
+                            ha='center', fontsize=9, alpha=0.7)
+        
+        ax5.set_title('Training Progression Overview')
+        ax5.set_xlabel('Epoch')
+        ax5.set_ylabel('Value (scaled)')
+        ax5.set_ylim([0, 1.1])
+        ax5.grid(True, alpha=0.3)
+        ax5.legend(loc='upper right')
+        
+        plt.suptitle(f'Dynamic Complexity Training: {self.experiment_name}', fontsize=14, fontweight='bold')
+        plt.tight_layout()
+        
+        complexity_plot_path = Path('results/plots') / f"{self.experiment_name}_complexity_progression.png"
+        plt.savefig(str(complexity_plot_path), dpi=150, bbox_inches='tight')
+        plt.close()
+        
+        self.logger.info(f"Saved complexity progression plot to {complexity_plot_path}")
+    
     def _print_training_summary(self, start_time: float):
-        """Override to include complexity details"""
+        """Print detailed training summary with complexity info"""
         total_time = time.time() - start_time
-        avg_collection = np.mean(self.metrics['timing']['collection'])
-        avg_training = np.mean(self.metrics['timing']['training'])
+        
         print(f"\n{'='*80}")
         print("DYNAMIC COMPLEXITY TRAINING SUMMARY")
         print(f"{'='*80}")
-        print(f"Total time: {total_time:.1f}s ({total_time/60:.1f} min)")
-        print(f"Best reward: {self.metrics['best_reward']:.2f}")
-        print(f"Final stage: {self.complexity_manager.get_current_task_class()}")
-        print(f"Final complexity: {self.complexity_manager.get_current_complexity():.2f}")
-        print(f"Total adjustments: {self.complexity_manager.adjustments_made}")
-        print(f"Model: {self.experiment_name}_best.pt")
+        print(f"Total training time: {total_time:.1f}s ({total_time/60:.1f} minutes)")
+        print(f"Final best reward: {self.metrics['best_reward']:.2f}")
+        
+        print(f"\nComplexity Progression:")
+        print(f"  Final stage: {self.complexity_manager.get_current_task_class()}")
+        print(f"  Final complexity: {self.complexity_manager.get_current_complexity():.2f}")
+        print(f"  Total adjustments made: {self.complexity_manager.adjustments_made}")
+        
+        if self.complexity_manager.performance_history:
+            print(f"  Final performance score: {self.complexity_manager.calculate_performance_score():.2f}")
+        
+        print(f"\nStage Progression:")
+        stages = ["basic", "doors", "buttons", "complex"]
+        for stage in stages:
+            if stage in self.metrics['task_class_history']:
+                first_epoch = self.metrics['task_class_history'].index(stage)
+                last_epoch = len(self.metrics['task_class_history']) - 1 - self.metrics['task_class_history'][::-1].index(stage)
+                duration = last_epoch - first_epoch + 1
+                avg_complexity = np.mean([c for c, s in zip(self.metrics['complexity_history'][first_epoch:last_epoch+1], 
+                                                          self.metrics['task_class_history'][first_epoch:last_epoch+1]) 
+                                        if s == stage])
+                print(f"  {stage.capitalize():8s}: epochs {first_epoch:4d}-{last_epoch:4d} "
+                      f"({duration:4d} epochs), avg complexity: {avg_complexity:.2f}")
+        
+        print(f"\nModel saved as: {self.experiment_name}_best.pt")
         print(f"{'='*80}")
+    
+    def train(self):
+        """Main training loop with dynamic complexity adjustments"""
+        training_config = self.config['training']
+        epochs = training_config['epochs']
+        save_interval = training_config['save_interval']
+        test_interval = training_config['test_interval']
+        
+        print("\n🎮 Dynamic Complexity Training Controls:")
+        print("  Press 'v' to visualize current environments")
+        print("  Press 'q' to stop training early")
+        print("=" * 50)
+        
+        cv2.namedWindow('Training Controls', cv2.WINDOW_NORMAL)
+        cv2.resizeWindow('Training Controls', 400, 100)
+        dummy = np.zeros((100, 400, 3), dtype=np.uint8)
+        cv2.putText(dummy, "Press 'v' to visualize", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,255,255),2)
+        cv2.putText(dummy, "Press 'q' to quit", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,255,255),2)
+        cv2.imshow('Training Controls', dummy)
+        cv2.waitKey(1)
+        
+        pbar = tqdm(range(epochs), desc="Training", unit="epoch")
+        start_time = time.time()
+        
+        for epoch in pbar:
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord('v'):
+                self._visualize_current_environments(epoch)
+                cv2.imshow('Training Controls', dummy)
+            elif key == ord('q'):
+                print("\n⚠️ Early stop requested.")
+                self._save_model('interrupted')
+                cv2.destroyAllWindows()
+                break
+            
+            epoch_start = time.time()
+            coll_start = time.time()
+            experiences = self._collect_experiences_parallel()
+            coll_time = time.time() - coll_start
+            
+            train_start = time.time()
+            train_metrics = self._train_step(experiences)
+            train_time = time.time() - train_start
+            
+            epoch_reward = train_metrics['reward']
+            
+            # Update complexity manager
+            self.complexity_manager.add_performance(epoch_reward, epoch)
+            adjustment = self.complexity_manager.adjust_complexity(epoch)
+            if adjustment:
+                self._handle_complexity_adjustment(adjustment, epoch)
+            
+            # Store metrics
+            self.metrics['train_rewards'].append(epoch_reward)
+            self.metrics['train_losses'].append(train_metrics['loss'])
+            self.metrics['timing']['collection'].append(coll_time)
+            self.metrics['timing']['training'].append(train_time)
+            self.metrics['timing']['total'].append(time.time() - epoch_start)
+            self.metrics['complexity_history'].append(self.complexity_manager.get_current_complexity())
+            self.metrics['task_class_history'].append(self.complexity_manager.get_current_task_class())
+            self.metrics['performance_scores'].append(self.complexity_manager.calculate_performance_score())
+            
+            if epoch % test_interval == 0 and epoch != 0:
+                test_metrics = self._test_epoch(episodes=10)
+                test_reward = test_metrics['reward']
+                self.metrics['test_rewards'].append(test_reward)
+                if test_reward > self.metrics['best_reward']:
+                    self.metrics['best_reward'] = test_reward
+                    self._save_model('best')
+                    self.logger.info(f"New best model with reward: {test_reward:.2f}")
+            
+            if epoch % save_interval == 0 and epoch != 0:
+                self._save_model(f'epoch_{epoch:06d}')
+            
+            avg_coll = np.mean(self.metrics['timing']['collection'][-10:]) if self.metrics['timing']['collection'] else coll_time
+            avg_train = np.mean(self.metrics['timing']['training'][-10:]) if self.metrics['timing']['training'] else train_time
+            
+            pbar.set_postfix({
+                'reward': f"{epoch_reward:.2f}",
+                'loss': f"{train_metrics['loss']:.4f}",
+                'best': f"{self.metrics['best_reward']:.2f}",
+                'stage': self.complexity_manager.get_current_task_class(),
+                'comp': f"{self.complexity_manager.get_current_complexity():.2f}",
+                'perf': f"{self.complexity_manager.calculate_performance_score():.2f}",
+                'adj': self.complexity_manager.adjustments_made,
+                'eps/s': f"{self.batch_size/(avg_coll+avg_train):.1f}",
+            })
+            
+            if self.use_wandb:
+                wandb.log({
+                    'train/reward': epoch_reward,
+                    'train/loss': train_metrics['loss'],
+                    'lr': self.lr_scheduler.get_lr(),
+                    'complexity/current': self.complexity_manager.get_current_complexity(),
+                    'complexity/stage': self._stage_to_numeric(self.complexity_manager.get_current_task_class()),
+                    'complexity/performance_score': self.complexity_manager.calculate_performance_score(),
+                })
+                if adjustment:
+                    wandb.log({
+                        'complexity/adjustment_action': adjustment.get('action', 'none'),
+                        'complexity/old_complexity': adjustment.get('old_complexity', 0.0),
+                        'complexity/new_complexity': adjustment.get('new_complexity', 0.0),
+                    })
+                if epoch % test_interval == 0 and epoch != 0:
+                    wandb.log({'test/reward': test_metrics['reward']})
+            
+            self.lr_scheduler.step()
+        
+        self._save_model('final')
+        self._save_metrics()
+        self._print_training_summary(start_time)
+        if self.use_wandb:
+            wandb.finish()
 
 
 # ============================================================================
