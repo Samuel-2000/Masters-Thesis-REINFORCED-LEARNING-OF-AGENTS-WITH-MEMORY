@@ -28,7 +28,7 @@ class EnvironmentFactory:
             'energy_per_step': 0.1,
             'render_size': 512 if test_mode else 0,
             'task_class': args.task_class if hasattr(args, 'task_class') else TaskClass.BASIC,
-            'complexity_level': max(0.0, min(1.0, args.complexity_level)) if hasattr(args, 'complexity_level') else 0.0,
+            'complexity_level': args.complexity_level
         }
         
         # For door parameters: pass -1/None for defaults

@@ -19,7 +19,7 @@ from src.core.vector_env import VectorizedMazeEnv
 from src.core.agent import Agent
 from src.core.utils import setup_logging, seed_everything
 from .losses import PolicyLoss, AuxiliaryLoss
-from .optimizers import GradientClipper, LearningRateScheduler
+from .optimizers import GradientClipper, LearningRateScheduler, OptimizerFactory
 
 import cv2
 
@@ -485,22 +485,13 @@ class ParallelTrainer:
         lr = training_config['learning_rate']
         weight_decay = training_config['weight_decay']
         
-        if optimizer_type == 'adam':
-            return optim.Adam(
-                self.agent.network.parameters(),
-                lr=lr,
-                weight_decay=weight_decay,
-                eps=1e-8
-            )
-        elif optimizer_type == 'adamw':
-            return optim.AdamW(
-                self.agent.network.parameters(),
-                lr=lr,
-                weight_decay=weight_decay,
-                eps=1e-8
-            )
-        else:
-            raise ValueError(f"Unknown optimizer: {optimizer_type}")
+        return OptimizerFactory.create(
+            optimizer_name=optimizer_type,
+            parameters=self.agent.network.parameters(),
+            lr=lr,
+            weight_decay=weight_decay
+        )
+
     
     def _collect_experiences_parallel(self) -> Dict[str, torch.Tensor]:
         """
