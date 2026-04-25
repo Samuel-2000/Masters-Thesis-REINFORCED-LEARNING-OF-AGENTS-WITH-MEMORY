@@ -163,17 +163,19 @@ class AuxiliaryLoss:
         """
         # Energy prediction loss
         energy_loss = F.mse_loss(energy_pred.squeeze(-1), energy_target)
+
+        obs_loss = self.obs_criterion(obs_pred, obs_target)
         
-        # Observation prediction loss
-        if self.obs_prediction_type == 'classification':
-            # For classification, obs_pred is [B, T, obs_dim, num_classes]
-            B, T, obs_dim, num_classes = obs_pred.shape
-            obs_pred = obs_pred.view(B * T * obs_dim, num_classes)
-            obs_target = obs_target.view(B * T * obs_dim).long()
-            obs_loss = self.obs_criterion(obs_pred, obs_target)
-        else:
-            # For regression, both are [B, T, obs_dim]
-            obs_loss = self.obs_criterion(obs_pred, obs_target)
+        ## Observation prediction loss
+        #if self.obs_prediction_type == 'classification':
+        #    # For classification, obs_pred is [B, T, obs_dim, num_classes]
+        #    B, T, obs_dim, num_classes = obs_pred.shape
+        #    obs_pred = obs_pred.view(B * T * obs_dim, num_classes)
+        #    obs_target = obs_target.view(B * T * obs_dim).long()
+        #    obs_loss = self.obs_criterion(obs_pred, obs_target)
+        #else:
+        #    # For regression, both are [B, T, obs_dim]
+        #    obs_loss = self.obs_criterion(obs_pred, obs_target)
         
         # Apply mask if provided
         if mask is not None:
@@ -182,9 +184,7 @@ class AuxiliaryLoss:
             obs_loss = obs_loss * valid_ratio
         
         # Weighted sum
-        total_loss = (self.energy_coef * energy_loss + 
-                     self.obs_coef * obs_loss)
-        
+        total_loss = (self.energy_coef * energy_loss + self.obs_coef * obs_loss)
         return total_loss
 
 

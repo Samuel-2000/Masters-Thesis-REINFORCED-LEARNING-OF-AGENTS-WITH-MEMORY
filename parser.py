@@ -160,8 +160,8 @@ def parse_args():
     if args.dynamic_complexity:
         defaults.update({
             "performance_window": 100,
-            "complexity_increase_threshold": 0.95,
-            "complexity_decrease_threshold": 0.7,
+            "complexity_increase_threshold": 0.6,
+            "complexity_decrease_threshold": 0.4,
             "complexity_step": 0.05,
             "min_complexity": 0.0,
             "max_complexity": 1.0,
