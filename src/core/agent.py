@@ -9,13 +9,10 @@ from typing import Dict, Any
 import cv2
 import os
 
-# Import network types
 from src.networks.lstm import LSTMPolicyNet
 from src.networks.transformer import TransformerPolicyNet
 from src.networks.multimemory import MultiMemoryPolicyNet
 from src.core.utils import safe_load
-
-# Import constants
 from src.core.constants import (
     OBSERVATION_SIZE, ACTION_SIZE, VOCAB_SIZE,
     ObservationTokens, Actions
@@ -23,12 +20,10 @@ from src.core.constants import (
 
 
 class Agent:
-    """Agent that interacts with environment using a policy network"""
-    
     def __init__(self,
                  network_type: str = 'lstm',
-                 observation_size: int = OBSERVATION_SIZE,  # Use constant (10)
-                 action_size: int = ACTION_SIZE,  # Use constant (6)
+                 observation_size: int = OBSERVATION_SIZE,
+                 action_size: int = ACTION_SIZE,
                  hidden_size: int = 512,
                  use_auxiliary: bool = False,
                  device: str = 'auto'):
@@ -39,22 +34,20 @@ class Agent:
         self.network_type = network_type
         self.use_auxiliary = use_auxiliary
         
-        # Validate observation tokens are in range
         self._validate_observation_range()
         
-        # Create network based on type with consistent sizes
         if network_type == 'lstm':
             self.network = LSTMPolicyNet(
-                vocab_size=VOCAB_SIZE,  # Now 19 tokens (0-18)
+                vocab_size=VOCAB_SIZE,
                 embed_dim=hidden_size,
-                observation_size=observation_size,  # Always 10
+                observation_size=observation_size,
                 hidden_size=hidden_size,
-                action_size=action_size,  # Always 6
+                action_size=action_size,
                 use_auxiliary=use_auxiliary
             )
         elif network_type == 'transformer':
             self.network = TransformerPolicyNet(
-                vocab_size=VOCAB_SIZE,  # Now 19 tokens
+                vocab_size=VOCAB_SIZE,
                 embed_dim=hidden_size,
                 observation_size=observation_size,
                 hidden_size=hidden_size,
@@ -66,7 +59,7 @@ class Agent:
             )
         elif network_type == 'multimemory':
             self.network = MultiMemoryPolicyNet(
-                vocab_size=VOCAB_SIZE,  # Now 19 tokens
+                vocab_size=VOCAB_SIZE,
                 embed_dim=hidden_size,
                 observation_size=observation_size,
                 hidden_size=hidden_size,
@@ -80,8 +73,6 @@ class Agent:
             raise ValueError(f"Unknown network type: {network_type}")
         
         self.network.to(self.device)
-        
-        # Debug
         print(f"Created {network_type} agent:")
         print(f"  Observation size: {observation_size}")
         print(f"  Action size: {action_size}")
@@ -89,100 +80,84 @@ class Agent:
         print(f"  Device: {device}")
     
     def _validate_observation_range(self):
-        """Validate that observation tokens are within expected range"""
-        max_token = ObservationTokens.ENERGY_LEVEL_4  # Should be 18
+        max_token = ObservationTokens.ENERGY_LEVEL_4
         if max_token != VOCAB_SIZE - 1:
             raise ValueError(f"Observation token range mismatch: "
                            f"max_token={max_token}, VOCAB_SIZE={VOCAB_SIZE}")
         print(f"✓ Observation tokens valid: 0-{max_token}")
     
-    def act(self, 
-            observation: np.ndarray,
-            training: bool = False) -> int:
-        """Select action based on observation"""
+    def act(self, observation: np.ndarray, training: bool = False) -> int:
         with torch.set_grad_enabled(training):
-            # Validate observation range
             obs_min, obs_max = observation.min(), observation.max()
             if obs_min < 0 or obs_max >= VOCAB_SIZE:
                 raise ValueError(f"Observation out of range [0, {VOCAB_SIZE-1}]: "
                                f"min={obs_min}, max={obs_max}")
             
-            # Convert observation to LongTensor for embedding layer
             obs_tensor = torch.from_numpy(observation).long()
-            
-            # Add batch and sequence dimensions [1, 1, obs_dim]
-            obs_tensor = obs_tensor.unsqueeze(0).unsqueeze(0)
-            obs_tensor = obs_tensor.to(self.device)
-            
-            # Get action logits
-            logits = self.network(obs_tensor)
-            
-            # Remove sequence dimension [1, action_size]
-            logits = logits.squeeze(1)
+            obs_tensor = obs_tensor.unsqueeze(0).unsqueeze(0).to(self.device)
+            logits = self.network(obs_tensor).squeeze(1)
             
             if training:
-                # Sample from distribution
                 probs = F.softmax(logits, dim=-1)
                 action = torch.multinomial(probs, 1).item()
             else:
-                # Take greedy action
                 action = logits.argmax(dim=-1).item()
             
-            # Validate action is within range
             if not (0 <= action < ACTION_SIZE):
                 raise ValueError(f"Invalid action: {action}")
-            
             return action
     
     def reset(self):
-        """Reset agent state"""
         if hasattr(self.network, 'reset_state'):
             self.network.reset_state()
     
-    def save(self, path: str):
-        """Save agent to file"""
-        # Get configuration from network
+    def save(self, path: str, extra_data: Dict[str, Any] = None):
+        """Save agent to file, optionally with extra metadata."""
         config = {
             'network_type': self.network_type,
             'use_auxiliary': self.use_auxiliary,
+            'hidden_size': self.network.hidden_size,
         }
-        
-        # Get network-specific config
         if hasattr(self.network, 'get_config'):
             config.update(self.network.get_config())
         else:
-            # Fallback to constant values
             config.update({
                 'vocab_size': VOCAB_SIZE,
                 'observation_size': OBSERVATION_SIZE,
                 'action_size': ACTION_SIZE,
-                'hidden_size': self.network.hidden_size if hasattr(self.network, 'hidden_size') else 512
             })
-        
-        torch.save({
+
+        save_dict = {
             'state_dict': self.network.state_dict(),
-            'config': config
-        }, path)
+            'config': config,
+        }
+        if extra_data is not None:
+            save_dict.update(extra_data)
+
+        torch.save(save_dict, path)
     
     @classmethod
     def load(cls, path: str, device: str = 'auto'):
-        """Load agent from file"""
         if device == 'auto':
             device = 'cuda' if torch.cuda.is_available() else 'cpu'
         
         checkpoint = safe_load(path, map_location=device)
-        config = checkpoint.get('config', {})
+        config = checkpoint['config']   # will crash if missing
         
-        # Get network type, default to 'lstm' for backward compatibility
-        network_type = config['network_type']
+        # Support both flat and nested (older) config structures
+        if 'model' in config:
+            cfg = config['model']
+        else:
+            cfg = config
         
-        # Use constants for sizes (override any saved values for consistency)
+        # Direct key access – crash if any missing
+        network_type = cfg['network_type']
+        use_auxiliary = cfg['use_auxiliary']
+        hidden_size = cfg['hidden_size']
+        
         observation_size = OBSERVATION_SIZE
         action_size = ACTION_SIZE
-        hidden_size = config['hidden_size']
-        use_auxiliary = config['use_auxiliary']
         
-        # Create agent with consistent sizes
         agent = cls(
             network_type=network_type,
             observation_size=observation_size,
@@ -192,110 +167,69 @@ class Agent:
             device=device
         )
         
-        # Load weights
-        agent.network.load_state_dict(checkpoint['state_dict'])
-        
+        agent.network.load_state_dict(checkpoint['state_dict'], strict=False)
+        print(f"Loaded agent from {path} (strict=False)")
         return agent
     
-    def test(self, 
-            env,
-            episodes: int = 10,
-            visualize: bool = False,
-            save_video: bool = False,
-            model_name: str = None) -> Dict[str, Any]:
-        """Test agent performance"""
+    def test(self, env, episodes: int = 10, visualize: bool = False,
+             save_video: bool = False, model_name: str = None) -> Dict[str, Any]:
         self.network.eval()
-        
         rewards = []
         success_flags = []
         steps_list = []
         
-        # Extract model name if not provided
         if model_name is None:
-            if hasattr(self, 'network_type'):
-                model_name = f"{self.network_type}_model"
-            else:
-                model_name = "model"
-        
-        # Clean model name for filename
+            model_name = f"{self.network_type}_model"
         clean_model_name = model_name.replace('/', '_').replace('\\', '_')
         
         for episode in range(episodes):
             obs, info = env.reset()
             self.reset()
-            
-            episode_reward = 0  # Track cumulative reward
+            episode_reward = 0
             steps = 0
             terminated = truncated = False
-            
-            frames = []  # Reset frames for each episode
+            frames = []
             
             while not (terminated or truncated) and steps < env.max_steps:
-                # Validate observation
                 if obs.min() < 0 or obs.max() >= VOCAB_SIZE:
-                    print(f"Warning: Invalid observation in episode {episode}, step {steps}: "
-                        f"min={obs.min()}, max={obs.max()}")
-                    # Clip to valid range
+                    print(f"Warning: Invalid observation in episode {episode}, step {steps}")
                     obs = np.clip(obs, 0, VOCAB_SIZE - 1)
                 
-                # Get action
                 action = self.act(obs, training=False)
-                
-                # Take step
-                obs, reward, terminated, truncated, info = env.step(action)  # Updated to get reward
-                
-                episode_reward += reward  # Sum rewards
+                obs, reward, terminated, truncated, info = env.step(action)
+                episode_reward += reward
                 steps += 1
                 
-                # Record frame if needed
                 if visualize or save_video:
                     frame = env.render()
                     if frame is not None:
                         if save_video:
-                            # Convert RGB to BGR for OpenCV
                             frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-                            frame_bgr = cv2.cvtColor(frame_bgr, cv2.COLOR_RGB2BGR)
                             frames.append(frame_bgr)
                         if visualize:
                             cv2.imshow('Test', frame)
-                            cv2.waitKey(50)  # ~20 FPS
+                            cv2.waitKey(50)
                 
-                # Save video for THIS episode immediately
                 if save_video and frames and (terminated or truncated or steps == env.max_steps):
                     if frames:
-                        # Create video writer for this specific episode
                         h, w, _ = frames[0].shape
                         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-                        
-                        # Use clean model name in video filename
                         video_path = f'results/videos/{clean_model_name}_ep_{episode}.mp4'
-                        
-                        # Ensure directory exists
                         os.makedirs(os.path.dirname(video_path), exist_ok=True)
-                        
-                        # Check if file exists and remove it (overwrite)
                         if os.path.exists(video_path):
                             os.remove(video_path)
-                        
-                        video_writer = cv2.VideoWriter(
-                            video_path, fourcc, 20.0, (w, h)
-                        )
-                        
+                        video_writer = cv2.VideoWriter(video_path, fourcc, 20.0, (w, h))
                         for frame in frames:
                             video_writer.write(frame)
-                        
                         video_writer.release()
                         print(f"✓ Saved video to {video_path}")
-                        
-                        # Clear frames for next episode
                         frames = []
             
-            rewards.append(episode_reward)  # Use cumulative reward
+            rewards.append(episode_reward)
             success_flags.append(steps == env.max_steps)
             steps_list.append(steps)
-            
             if visualize:
-                cv2.waitKey(500)  # Pause between episodes
+                cv2.waitKey(500)
         
         if visualize:
             cv2.destroyAllWindows()

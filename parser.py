@@ -165,9 +165,9 @@ def parse_args():
             "complexity_step": 0.05,
             "min_complexity": 0.0,
             "max_complexity": 1.0,
-            "adjustment_interval": 500,
-            "stagnation_switch_interval": 1000,
-            "stagnation_termination": 5000,
+            "adjustment_interval": 100,
+            "stagnation_switch_interval": 500,
+            "stagnation_termination": 2000,
             "min_basic_complexity": 0.2,
             "curriculum_stages": ["basic", "doors", "buttons", "complex"],
         })
