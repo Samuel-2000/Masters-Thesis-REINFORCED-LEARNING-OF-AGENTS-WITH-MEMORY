@@ -4,7 +4,7 @@ Optimizer utilities for training
 
 import torch
 import torch.optim as optim
-from typing import List, Optional, Union, Callable
+from typing import List, Optional, Union
 import math
 
 
@@ -221,40 +221,3 @@ class OptimizerFactory:
         
         else:
             raise ValueError(f"Unknown optimizer: {optimizer_name}")
-
-
-class EMA:
-    """Exponential Moving Average for model parameters"""
-    
-    def __init__(self, model, decay: float = 0.999):
-        self.model = model
-        self.decay = decay
-        self.shadow = {}
-        self.backup = {}
-        
-        # Register parameters
-        for name, param in model.named_parameters():
-            if param.requires_grad:
-                self.shadow[name] = param.data.clone()
-    
-    def update(self):
-        """Update shadow parameters"""
-        for name, param in self.model.named_parameters():
-            if param.requires_grad:
-                self.shadow[name] = self.decay * self.shadow[name] + \
-                                   (1 - self.decay) * param.data
-    
-    def apply_shadow(self):
-        """Apply shadow parameters to model"""
-        self.backup = {}
-        for name, param in self.model.named_parameters():
-            if param.requires_grad:
-                self.backup[name] = param.data.clone()
-                param.data = self.shadow[name]
-    
-    def restore(self):
-        """Restore original parameters"""
-        for name, param in self.model.named_parameters():
-            if param.requires_grad and name in self.backup:
-                param.data = self.backup[name]
-        self.backup = {}

@@ -15,30 +15,6 @@ class EnvironmentFactory:
     """Factory for creating maze environments with various configurations"""
     
     @staticmethod
-    def create_from_args(args, test_mode: bool = False) -> GridMazeWorld:
-        """Create environment instance from command line arguments"""
-        env_config = {
-            'grid_size': 11,
-            'max_steps': 100,
-            'obstacle_fraction': 0.25,
-            'n_food_sources': 4,
-            'food_energy': 10.0,
-            'initial_energy': 30.0,
-            'energy_decay': 0.98,
-            'energy_per_step': 0.1,
-            'render_size': 512 if test_mode else 0,
-            'task_class': args.task_class if hasattr(args, 'task_class') else TaskClass.BASIC,
-            'complexity_level': args.complexity_level
-        }
-        
-        # For door parameters: pass -1/None for defaults
-        env_config['n_doors'] = -1  # Always use task class default unless explicitly overridden
-        env_config['n_buttons_per_door'] = -1
-        env_config['button_break_probability'] = -1.0
-        
-        return GridMazeWorld(**env_config)
-    
-    @staticmethod
     def create_from_config(config: Dict[str, Any], test_mode: bool = False) -> GridMazeWorld:
         """Create environment instance from configuration dictionary"""
         if 'environment' in config:

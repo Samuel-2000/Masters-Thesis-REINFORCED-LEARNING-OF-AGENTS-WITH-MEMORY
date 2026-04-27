@@ -11,17 +11,12 @@ import math
 
 # Import your project's constants; adjust path as needed
 from .constants import (
-    ObservationTokens, OBSERVATION_SIZE, NEIGHBOR_POSITIONS,
-    ACTION_TOKEN_POSITION, ENERGY_TOKEN_POSITION, VOCAB_SIZE,
+    OBSERVATION_SIZE, VOCAB_SIZE,
     Actions, NUM_ACTIONS, ENV_ACTIONS_START,
     TileType, TILE_COLORS,
     TaskClass,
-    DEFAULT_GRID_SIZE, DEFAULT_MAX_STEPS, DEFAULT_OBSTACLE_FRACTION,
-    DEFAULT_FOOD_SOURCES, DEFAULT_FOOD_ENERGY, DEFAULT_INITIAL_ENERGY,
-    DEFAULT_ENERGY_DECAY, DEFAULT_ENERGY_PER_STEP,
-    action_to_token, grid_tile_to_observation_token
+    FOOD_INTERVAL_INDEX, FOOD_EXISTS_INDEX, MIN_FOOD_REGEN_TIME, MAX_FOOD_REGEN_TIME
 )
-
 
 
 @njit(cache=True)
@@ -424,12 +419,12 @@ def food_step(agent_y: int, agent_x: int, food_sources: np.ndarray, food_energy:
         y, x, time_left, has_food = food_sources[i]
         if agent_y == y and agent_x == x and has_food:
             energy_gained += food_energy
-            food_sources[i, 2] = np.random.randint(5, 15)
-            food_sources[i, 3] = 0
+            food_sources[i, FOOD_INTERVAL_INDEX] = np.random.randint(MIN_FOOD_REGEN_TIME, MAX_FOOD_REGEN_TIME)
+            food_sources[i, FOOD_EXISTS_INDEX] = 0
         elif time_left > 0:
-            food_sources[i, 2] = time_left - 1
+            food_sources[i, FOOD_INTERVAL_INDEX] = time_left - 1
         elif time_left == 0:
-            food_sources[i, 3] = 1
+            food_sources[i, FOOD_EXISTS_INDEX] = 1
     return energy_gained
 
 
@@ -653,34 +648,23 @@ class GridMazeWorld(gym.Env):
     def _templates_flat_list(self) -> List[np.ndarray]:
         """Return list of 9-element flattened templates (values -1/0/1)."""
         templates_3x3 = [
-            np.array([[-1,  0, -1], [ 1,  0,  1], [-1,  0, -1]], dtype=np.int8),  # vertical
-            np.array([[-1,  1, -1], [ 0,  0,  0], [-1,  1, -1]], dtype=np.int8),  # horizontal
-            np.array([[-1,  0,  1], [ 0,  0,  0], [ 1,  0, -1]], dtype=np.int8),
-            np.array([[ 1,  0, -1], [ 0,  0,  0], [-1,  0,  1]], dtype=np.int8),
-            np.array([[-1,  1, -1], [ 0,  0, -1], [ 1,  0, -1]], dtype=np.int8),
-            np.array([[-1, -1, -1], [ 0,  0,  1], [ 1,  0, -1]], dtype=np.int8),
-            np.array([[-1,  0,  1], [ 1,  0,  0], [-1, -1, -1]], dtype=np.int8),
-            np.array([[-1,  0,  1], [-1,  0,  0], [-1,  1, -1]], dtype=np.int8),
-            np.array([[-1,  1, -1], [-1,  0,  0], [-1,  0,  1]], dtype=np.int8),
-            np.array([[-1, -1, -1], [ 1,  0,  0], [-1,  0,  1]], dtype=np.int8),
-            np.array([[ 1,  0, -1], [ 0,  0, -1], [-1,  1, -1]], dtype=np.int8),
-            np.array([[ 1,  0, -1], [ 0,  0,  1], [-1, -1, -1]], dtype=np.int8),
-            np.array([[ 1,  0, -1], [ 0,  0,  0], [-1,  0,  1]], dtype=np.int8),
-            np.array([[-1,  0,  1], [ 0,  0,  0], [ 1,  0, -1]], dtype=np.int8),
-            np.array([[-1,  0, -1], [ 1,  0,  0], [-1,  0,  1]], dtype=np.int8),
-            np.array([[ 1,  0, -1], [ 0,  0,  1], [-1,  0, -1]], dtype=np.int8),
+            np.array([[-1,  0, -1], [ 1,  0,  1], [-1,  0, -1]], dtype=np.int8),  # T_vert
+            np.array([[-1,  1, -1], [ 0,  0,  0], [-1,  1, -1]], dtype=np.int8),  # T_horiz
+            np.array([[-1,  0,  1], [ 0,  0,  0], [ 1,  0, -1]], dtype=np.int8),  # T_diag1
+            np.array([[ 1,  0, -1], [ 0,  0,  0], [-1,  0,  1]], dtype=np.int8),  # T_diag2
+            np.array([[-1,  1, -1], [ 0,  0, -1], [ 1,  0, -1]], dtype=np.int8),  # T_a
+            np.array([[-1, -1, -1], [ 0,  0,  1], [ 1,  0, -1]], dtype=np.int8),  # T_b
+            np.array([[-1,  0,  1], [ 1,  0,  0], [-1, -1, -1]], dtype=np.int8),  # T_c
+            np.array([[-1,  0,  1], [-1,  0,  0], [-1,  1, -1]], dtype=np.int8),  # T_d
+            np.array([[-1,  1, -1], [-1,  0,  0], [-1,  0,  1]], dtype=np.int8),  # T_e
+            np.array([[-1, -1, -1], [ 1,  0,  0], [-1,  0,  1]], dtype=np.int8),  # T_T_fhoriz
+            np.array([[ 1,  0, -1], [ 0,  0, -1], [-1,  1, -1]], dtype=np.int8),  # T_g
+            np.array([[ 1,  0, -1], [ 0,  0,  1], [-1, -1, -1]], dtype=np.int8)  # T_h
         ]
         # flatten row-major
         return [t.flatten() for t in templates_3x3]
 
     # ------------------ Helper utilities ---------------------------------
-    def _get_temp_grid_with_periodic_doors_open(self) -> np.ndarray:
-        temp = self.grid.copy()
-        for d in self.doors:
-            if not d.requires_button:
-                temp[d.y, d.x] = TileType.DOOR_OPEN
-        return temp
-
     def _is_passable(self, tile_type: int) -> bool:
         return tile_type in [TileType.EMPTY, TileType.FOOD, TileType.FOOD_SOURCE, TileType.BUTTON, TileType.BUTTON_BROKEN, TileType.DOOR_OPEN]
 
@@ -722,17 +706,6 @@ class GridMazeWorld(gym.Env):
         # Label components (numba, in-place)
         nlabels = _label_components_numba_inplace(pass_mask, labels)
 
-        # --- Fast path option (metadata only) ---
-        # If later logic only needs counts / sizes, stop here.
-        # Example:
-        # sizes = np.zeros(nlabels, dtype=np.int32)
-        # for y in range(h):
-        #     for x in range(w):
-        #         lab = labels[y, x]
-        #         if lab > 0:
-        #             sizes[lab - 1] += 1
-        # return sizes
-
         # --- Full region materialization (single scan) ---
         regions: List[List[Tuple[int, int]]] = [[] for _ in range(nlabels)]
 
@@ -745,45 +718,6 @@ class GridMazeWorld(gym.Env):
         return regions
 
 
-
-    def _bfs_distance(self, start_y: int, start_x: int, target_y: int, target_x: int, grid_override: Optional[np.ndarray] = None) -> int:
-        """Calculate actual shortest path distance using BFS"""
-        grid = grid_override if grid_override is not None else self.grid
-        h, w = grid.shape
-
-        if start_y == target_y and start_x == target_x:
-            return 0
-
-        visited = np.zeros((h, w), dtype=bool)
-        queue = deque()
-        queue.append((start_y, start_x, 0))
-        visited[start_y, start_x] = True
-
-        directions = [(-1, 0), (1, 0), (0, -1), (0, 1)]
-
-        while queue:
-            y, x, dist = queue.popleft()
-
-            for dy, dx in directions:
-                ny, nx = y + dy, x + dx
-
-                if not (0 <= ny < h and 0 <= nx < w):
-                    continue
-                if visited[ny, nx]:
-                    continue
-
-                # Check if cell is passable
-                tile = grid[ny, nx]
-                if not self._is_passable(tile):
-                    continue
-
-                if ny == target_y and nx == target_x:
-                    return dist + 1
-
-                visited[ny, nx] = True
-                queue.append((ny, nx, dist + 1))
-
-        return float('inf')  # Unreachable
 
     # ---------------- Door candidate scanning (vectorized) ------------------
     def _find_door_candidates_with_templates(self, grid_to_use: np.ndarray) -> List[Tuple[int, int]]:
@@ -832,48 +766,6 @@ class GridMazeWorld(gym.Env):
                       (g == TileType.DOOR_OPEN))] = 1
         self._passable_mask = mask
 
-    def _bfs_distance_using_mask(self, start_y: int, start_x: int,
-                                 target_y: int, target_x: int,
-                                 grid_override: Optional[np.ndarray] = None) -> int:
-        """
-        Wrapper that uses the precomputed passable mask to return the distance
-        between start and target (4-neighbour). If unreachable, returns large value.
-
-        This performs a standard BFS but uses fast numpy mask lookups to check
-        passability.
-        """
-        grid = grid_override if grid_override is not None else self.grid
-        h, w = grid.shape
-
-        if start_y == target_y and start_x == target_x:
-            return 0
-
-        if self._passable_mask is None:
-            self._update_passable_mask()
-
-        # quick rejection using precomputed passable mask
-        if self._passable_mask[target_y, target_x] == 0:
-            return float('inf')
-
-        visited = np.zeros((h, w), dtype=np.uint8)
-        q = deque()
-        q.append((start_y, start_x, 0))
-        visited[start_y, start_x] = 1
-        while q:
-            y, x, d = q.popleft()
-            for dy, dx in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
-                ny, nx = y + dy, x + dx
-                if not (0 <= ny < h and 0 <= nx < w):
-                    continue
-                if visited[ny, nx]:
-                    continue
-                if self._passable_mask[ny, nx] == 0:
-                    continue
-                if ny == target_y and nx == target_x:
-                    return d + 1
-                visited[ny, nx] = 1
-                q.append((ny, nx, d + 1))
-        return float('inf')
 
     # ---------------- Door & button placement (optimized) ------------------
     def _can_place_door_with_buttons(self, y: int, x: int, grid_to_use: np.ndarray) -> Tuple[bool, List[Tuple[int, int]]]:
@@ -1096,7 +988,7 @@ class GridMazeWorld(gym.Env):
         self.food_sources = np.zeros((len(indices), 4), dtype=np.int32)
         for i, idx in enumerate(indices):
             y, x = empty_cells[idx]
-            regen_time = np.random.randint(5, 15)
+            regen_time = np.random.randint(MIN_FOOD_REGEN_TIME, MAX_FOOD_REGEN_TIME)
             self.food_sources[i] = [y, x, regen_time, 1]
             self.grid[y, x] = TileType.FOOD_SOURCE
 

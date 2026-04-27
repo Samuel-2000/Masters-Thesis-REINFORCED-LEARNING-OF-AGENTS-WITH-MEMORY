@@ -78,7 +78,7 @@ def parse_args():
                                 default=["basic","doors","buttons","complex"])
 
         general_parser.add_argument("--task-class", type=str, choices=["basic","doors","buttons","complex"], default=None)
-        general_parser.add_argument("--complexity-level", type=float, default=0.0)
+        general_parser.add_argument("--complexity-level", type=float, default=None)
         general_parser.add_argument("--n-doors", type=int, default=None)
         general_parser.add_argument("--n-buttons-per-door", type=int, choices=[0,1,2,3,4], default=None)
         general_parser.add_argument("--button-break-probability", type=float, default=None)
@@ -133,7 +133,7 @@ def parse_args():
     if bool(args.dynamic_complexity) == bool(args.task_class):
         raise "either use dynamic_complexity or choose task_class"
     
-    if bool(args.dynamic_complexity) == bool(args.complexity_level):
+    if bool(args.dynamic_complexity) == (args.complexity_level is not None):
         raise "either use dynamic_complexity or choose complexity_level"
     
     if bool(args.dynamic_complexity) and bool(any([args.n_doors, args.n_buttons_per_door, args.button_break_probability])):
@@ -159,7 +159,7 @@ def parse_args():
 
     if args.dynamic_complexity:
         defaults.update({
-            "performance_window": 100,
+            "performance_window": 10,
             "complexity_increase_threshold": 0.6,
             "complexity_decrease_threshold": 0.4,
             "complexity_step": 0.05,
@@ -177,26 +177,15 @@ def parse_args():
             "optimizer": "adam",
             "weight_decay": 0.0
         })
-
-    #defaults = {
-    #    "performance_window": 100,
-    #    "complexity_increase_threshold": 0.95,
-    #    "complexity_decrease_threshold": 0.7,
-    #    "complexity_step": 0.05,
-    #    "min_complexity": 0.0,
-    #    "max_complexity": 1.0,
-    #    "adjustment_interval": 500,
-    #    "stagnation_switch_interval": 1000,
-    #    "stagnation_termination": 5000,
-    #    "min_basic_complexity": 0.2,
-    #    "curriculum_stages": ["basic", "doors", "buttons", "complex"],
-    #}
+        if args.auxiliary_tasks:
+            print(f"Info: auxiliary tasks enabled")
 
     # Iterate over each argument and assign default if None
     for arg_name, default_value in defaults.items():
         if getattr(args, arg_name, None) is None:
             setattr(args, arg_name, default_value)
             print(f"Warning: --{arg_name.replace('_', '-')} was None, setting to default {default_value}")
+
 
     # For benchmark and visualize, we keep required=True for environment parameters as before.
 

@@ -176,9 +176,16 @@ def token_to_energy(token: int, max_energy: float = 100.0) -> float:
 OBSERVATION_SIZE = 10
 ACTION_SIZE = NUM_ACTIONS
 
+
 # ============================================================================
 # ENVIRONMENT CONSTANTS
 # ============================================================================
+
+# Food
+MIN_FOOD_REGEN_TIME = 10
+MAX_FOOD_REGEN_TIME = 30
+FOOD_INTERVAL_INDEX = 2
+FOOD_EXISTS_INDEX = 3
 
 class TaskClass:
     """Task class definitions"""
@@ -207,8 +214,7 @@ DEFAULT_GAMMA = 0.97
 DEFAULT_ENTROPY_COEF = 0.01
 DEFAULT_MAX_GRAD_NORM = 1.0
 DEFAULT_SAVE_INTERVAL = 1000
-DEFAULT_TEST_INTERVAL = 500
-
+DEFAULT_TEST_INTERVAL = 100
 
 
 

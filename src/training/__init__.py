@@ -2,7 +2,7 @@
 from .trainer import Trainer
 from .losses import PolicyLoss, AuxiliaryLoss, ValueLoss, CompositeLoss
 from .optimizers import (GradientClipper, LearningRateScheduler, 
-                        OptimizerFactory, EMA)
+                        OptimizerFactory)
 
 __all__ = [
     'Trainer',
@@ -13,5 +13,4 @@ __all__ = [
     'GradientClipper',
     'LearningRateScheduler',
     'OptimizerFactory',
-    'EMA'
 ]
