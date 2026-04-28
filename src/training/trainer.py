@@ -7,7 +7,6 @@ import torch
 import torch.optim as optim
 import numpy as np
 from tqdm import tqdm
-import wandb
 from pathlib import Path
 from typing import Dict, Any, Optional, Tuple, List, Deque
 import time
@@ -60,14 +59,14 @@ class ComplexityManager:
         self._last_performance_score = 0.0
         self.max_rewards_by_stage = {}
         self.epochs_without_progress = 0  # Tracks stagnation
+        self.last_complexity_increase_epoch = 0   # epoch when complexity last increased
         self.last_max_reward = -float('inf')
-        self.last_stagnation_check = 0  # NEW: track when we last checked for stagnation
         
         # Statistics
         self.adjustments_made = 0
         self.stage_switches = 0  # Track how many times we switch tasks
 
-    def add_performance(self, reward: float, epoch: int):
+    def add_performance(self, reward: float):
         """Add performance metric to history"""
         self.performance_history.append(reward)
         
@@ -108,17 +107,12 @@ class ComplexityManager:
             return False
         
         return True
-    
+
+
     def should_switch_stage(self, epoch: int) -> bool:
         """Check if we should switch to a different task due to stagnation"""
         if not self.enabled:
             return False
-        
-        # NEW: Only check stagnation every stagnation_switch_interval epochs
-        if epoch - self.last_stagnation_check < self.stagnation_switch_interval:
-            return False
-        
-        self.last_stagnation_check = epoch  # Update last check time
         
         current_stage = self.get_current_task_class()
         current_complexity = self.stage_complexities[current_stage]
@@ -127,8 +121,8 @@ class ComplexityManager:
         if current_stage == 'basic' and current_complexity < self.min_basic_complexity:
             return False
         
-        # Switch if we've been stuck for too long
-        if self.epochs_without_progress >= self.stagnation_termination:
+        # Complexity stagnation detection
+        if epoch - self.last_complexity_increase_epoch >= self.stagnation_switch_interval:
             return True
         
         # Optional: Check for oscillation (could be enhanced with more sophisticated detection)
@@ -263,6 +257,7 @@ class ComplexityManager:
             new_complexity = min(self.max_complexity, old_complexity + self.complexity_step)
             adjustment_info["action"] = "increased_complexity"
             self.epochs_without_progress = 0
+            self.last_complexity_increase_epoch = epoch
 
         elif performance_score < self.decrease_threshold:
             if old_complexity <= self.min_complexity:
@@ -331,7 +326,6 @@ class ComplexityManager:
             "adjustments_made": self.adjustments_made,
             "stage_switches": self.stage_switches,
             "epochs_without_progress": self.epochs_without_progress,
-            "last_stagnation_check": self.last_stagnation_check,
             "performance_score": self.calculate_performance_score(), # if self.performance_history else 0.0,
             "max_rewards_by_stage": self.max_rewards_by_stage,
             "basic_min_complexity_reached": self.stage_complexities['basic'] >= self.min_basic_complexity
@@ -345,9 +339,7 @@ class ComplexityManager:
 class ParallelTrainer:
     """Base trainer with parallel execution, fixed environment (no dynamic complexity)"""
     
-    def __init__(self, 
-                 config: Dict[str, Any],
-                 use_wandb: bool = False):
+    def __init__(self, config: Dict[str, Any]):
         
         self.config = config
         self.experiment_name = f"{config['model']['type']}_" \
@@ -357,8 +349,8 @@ class ParallelTrainer:
         
         if config['training']['auxiliary_tasks']:
             self.experiment_name += "_aux"
-        
-        self.use_wandb = use_wandb
+
+        self.base_seed = config['experiment']['seed']
         
         # Setup
         self.logger = setup_logging(self.experiment_name)
@@ -426,14 +418,7 @@ class ParallelTrainer:
         }
 
 
-        
-        # Initialize wandb
-        if use_wandb:
-            wandb.init(
-                project="maze-rl",
-                name=self.experiment_name,
-                config=config
-            )
+
 
     def _create_vectorized_env(self) -> VectorizedMazeEnv:
         """Create vectorized training environment from config (fixed)"""
@@ -478,6 +463,19 @@ class ParallelTrainer:
         )
 
     
+    #def _sample_actions_deterministic(self, logits: torch.Tensor) -> torch.Tensor:
+    #    """
+    #    Sample actions deterministically using NumPy (CPU).
+    #    logits: [B, A] on current device.
+    #    Returns: action indices as torch.LongTensor on same device.
+    #    """
+    #    # Move logits to CPU and convert to NumPy
+    #    probs = torch.softmax(logits, dim=-1).cpu().numpy()  # [B, A]
+    #    actions = np.zeros(logits.shape[0], dtype=np.int64)
+    #    for i, p in enumerate(probs):
+    #        actions[i] = np.random.choice(len(p), p=p)   # uses global seeded NumPy RNG
+    #    return torch.from_numpy(actions).to(logits.device)
+
     def _collect_experiences_parallel(self) -> Dict[str, torch.Tensor]:
         """
         Collect experiences in parallel across all environments
@@ -523,7 +521,8 @@ class ParallelTrainer:
                 # Sample actions during training
                 if self.agent.network.training:
                     probs = torch.softmax(logits, dim=-1)
-                    actions = torch.multinomial(probs, 1).squeeze(-1)  # [B]
+                    actions = torch.multinomial(probs, 1).squeeze(-1)  # [B] # Warning, torch.multinomial may cause small deviations between runs, therefore harming reproducibility
+                    #actions = self._sample_actions_deterministic(logits)
                 else:
                     actions = logits.argmax(dim=-1)  # [B]
             
@@ -655,7 +654,7 @@ class ParallelTrainer:
         max_steps = 0
 
         for _ in range(epochs):
-            test_env = VectorizedMazeEnv(num_envs=self.batch_size, env_config=env_config)
+            test_env = VectorizedMazeEnv(num_envs=self.batch_size, env_config=env_config, base_seed=self.base_seed)
             max_steps = test_env.envs[0].max_steps
             obs_array, _ = test_env.reset()
             obs_t = torch.tensor(obs_array, dtype=torch.long, device=self.device).unsqueeze(1)
@@ -1042,7 +1041,7 @@ class ParallelTrainer:
                     self.metrics['best_reward'] = test_reward
                     self._save_model('best')
                     self.logger.info(f"New best model with reward: {test_reward:.2f}")
-            
+
             if epoch % save_interval == 0 and epoch != 0:
                 self._save_model(f'epoch_{epoch:06d}')
             
@@ -1055,16 +1054,7 @@ class ParallelTrainer:
                 'best': f"{self.metrics['best_reward']:.2f}",
                 'eps/s': f"{self.batch_size/(avg_coll+avg_train):.1f}",
             })
-            
-            if self.use_wandb:
-                wandb.log({
-                    'train/reward': train_metrics['reward'],
-                    'train/loss': train_metrics['loss'],
-                    'lr': self.lr_scheduler.get_lr(),
-                })
-                if epoch % test_interval == 0 and epoch != 0:
-                    wandb.log({'test/reward': test_metrics['reward']})
-            
+
             self.lr_scheduler.step()
 
         test_metrics = self._test_valid(epochs=4)
@@ -1079,9 +1069,6 @@ class ParallelTrainer:
         self._save_model('final')
         self._save_metrics()
         self._print_training_summary(start_time)
-        if self.use_wandb:
-            wandb.finish()
-
 
 # ============================================================================
 # ADAPTIVE TRAINER (inherits from ParallelTrainer)
@@ -1090,16 +1077,11 @@ class ParallelTrainer:
 class AdaptiveParallelTrainer(ParallelTrainer):
     """Trainer with dynamic complexity adjustment"""
     
-    def __init__(self, config: Dict[str, Any], use_wandb: bool = False):
-        # Mark dynamic in experiment name
-        config['training']['dynamic_complexity'] = True  # ensure flag set
-        # Create complexity manager
+    def __init__(self, config: Dict[str, Any]):
+        config['training']['dynamic_complexity'] = True
         self.complexity_manager = ComplexityManager(config)
+        super().__init__(config)
         
-        super().__init__(config, use_wandb)
-        
-        
-        # Override initial environment to use manager's config
         self.vector_env = self._create_vectorized_env()
         
         # Extend metrics for complexity tracking
@@ -1110,6 +1092,7 @@ class AdaptiveParallelTrainer(ParallelTrainer):
         # Log initial status
         self.logger.info(f"Dynamic complexity enabled: {self.complexity_manager.get_status()}")
     
+
     def get_environment_config(self):
         """Get dynamic environment configuration from complexity manager"""
         return self.complexity_manager.get_environment_config()
@@ -1119,7 +1102,8 @@ class AdaptiveParallelTrainer(ParallelTrainer):
         env_config = self.get_environment_config()
         return VectorizedMazeEnv(
             num_envs=self.batch_size,
-            env_config=env_config
+            env_config=env_config,
+            base_seed=self.base_seed
         )
     
     def _recreate_vectorized_env(self):
@@ -1318,6 +1302,10 @@ class AdaptiveParallelTrainer(ParallelTrainer):
                 self._save_model('interrupted')
                 cv2.destroyAllWindows()
                 break
+
+            
+            if self.complexity_manager.epochs_without_progress >= self.complexity_manager.stagnation_termination:
+                return True
             
             epoch_start = time.time()
             coll_start = time.time()
@@ -1331,7 +1319,7 @@ class AdaptiveParallelTrainer(ParallelTrainer):
             epoch_reward = train_metrics['reward']
             
             # Update complexity manager
-            self.complexity_manager.add_performance(epoch_reward, epoch)
+            self.complexity_manager.add_performance(epoch_reward)
             adjustment = self.complexity_manager.adjust_complexity(epoch)
             if adjustment:
                 self._handle_complexity_adjustment(adjustment, epoch)
@@ -1357,7 +1345,7 @@ class AdaptiveParallelTrainer(ParallelTrainer):
                     self.metrics['best_reward'] = test_reward
                     self._save_model('best')
                     self.logger.info(f"New best model with reward: {test_reward:.2f}")
-            
+
             if epoch % save_interval == 0 and epoch != 0:
                 self._save_model(f'epoch_{epoch:06d}')
             
@@ -1375,24 +1363,6 @@ class AdaptiveParallelTrainer(ParallelTrainer):
                 'eps/s': f"{self.batch_size/(avg_coll+avg_train):.1f}",
             })
             
-            if self.use_wandb:
-                wandb.log({
-                    'train/reward': epoch_reward,
-                    'train/loss': train_metrics['loss'],
-                    'lr': self.lr_scheduler.get_lr(),
-                    'complexity/current': self.complexity_manager.get_current_complexity(),
-                    'complexity/stage': self._stage_to_numeric(self.complexity_manager.get_current_task_class()),
-                    'complexity/performance_score': self.complexity_manager.calculate_performance_score(),
-                })
-                if adjustment:
-                    wandb.log({
-                        'complexity/adjustment_action': adjustment.get('action', 'none'),
-                        'complexity/old_complexity': adjustment.get('old_complexity', 0.0),
-                        'complexity/new_complexity': adjustment.get('new_complexity', 0.0),
-                    })
-                if epoch % test_interval == 0 and epoch != 0:
-                    wandb.log({'test/reward': test_metrics['reward']})
-            
             self.lr_scheduler.step()
 
         test_metrics = self._test_valid(epochs=4)
@@ -1407,17 +1377,15 @@ class AdaptiveParallelTrainer(ParallelTrainer):
         self._save_model('final')
         self._save_metrics()
         self._print_training_summary(start_time)
-        if self.use_wandb:
-            wandb.finish()
 
 
 # ============================================================================
 # FACTORY: Return appropriate trainer based on config
 # ============================================================================
 
-def Trainer(config: Dict[str, Any], use_wandb: bool = False):
+def Trainer(config: Dict[str, Any]):
     """Factory function returning either ParallelTrainer or AdaptiveParallelTrainer"""
     if config['training'].get('dynamic_complexity', False):
-        return AdaptiveParallelTrainer(config, use_wandb)
+        return AdaptiveParallelTrainer(config)
     else:
-        return ParallelTrainer(config, use_wandb)
+        return ParallelTrainer(config)

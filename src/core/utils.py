@@ -54,7 +54,7 @@ def seed_everything(seed: int = 42):
     torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
-
+    torch.use_deterministic_algorithms(True)
 
 
 def safe_load(path: str, map_location=None, **kwargs):

@@ -19,7 +19,7 @@ from src.core.constants import (
     DEFAULT_FOOD_SOURCES, DEFAULT_FOOD_ENERGY, DEFAULT_INITIAL_ENERGY,
     DEFAULT_ENERGY_DECAY, DEFAULT_ENERGY_PER_STEP, DEFAULT_RENDER_SIZE,
     DEFAULT_DOOR_OPEN_DURATION, DEFAULT_DOOR_CLOSE_DURATION,
-    DEFAULT_SEED, DEFAULT_HIDDEN_SIZE, DEFAULT_GAMMA, DEFAULT_ENTROPY_COEF,
+    DEFAULT_HIDDEN_SIZE, DEFAULT_GAMMA, DEFAULT_ENTROPY_COEF,
     DEFAULT_MAX_GRAD_NORM, DEFAULT_SAVE_INTERVAL, DEFAULT_TEST_INTERVAL,
 )
 
@@ -59,8 +59,7 @@ def main():
             "experiment": {
                 "name": args.experiment_name or f"{args.network_type}_{args.batch_size}b_{args.lr}lr",
                 "save_dir": args.save_dir,
-                "seed": DEFAULT_SEED,
-                "use_wandb": False,
+                "seed": args.seed,
             },
             "environment": env_config,
             "model": {

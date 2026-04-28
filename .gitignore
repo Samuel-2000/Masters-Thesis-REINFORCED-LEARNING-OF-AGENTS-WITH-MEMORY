@@ -5,7 +5,6 @@ __pycache__/
 *.pyc
 
 *.mp4
-*.wandb
 *checkpoint.pt
 *.json
 

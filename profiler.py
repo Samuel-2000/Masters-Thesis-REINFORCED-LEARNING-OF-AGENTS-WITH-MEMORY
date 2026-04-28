@@ -55,8 +55,7 @@ class DetailedProfiler:
         config = {
             'experiment': {
                 'name': f'profile_{self.args.task_class}_comp{self.args.complexity_level}',
-                'seed': 42,
-                'use_wandb': False
+                'seed': 42
             },
             'environment': {
                 'grid_size': 11,
@@ -614,7 +613,7 @@ class DetailedProfiler:
             
             # Create trainer
             print("\nCreating trainer...")
-            trainer = AdaptiveParallelTrainer(self.config, use_wandb=False)
+            trainer = AdaptiveParallelTrainer(self.config)
             
             # 1. Run cProfile analysis
             cprofile_stats = self.run_cprofile_analysis(trainer)

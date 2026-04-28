@@ -83,6 +83,8 @@ def parse_args():
         general_parser.add_argument("--n-buttons-per-door", type=int, choices=[0,1,2,3,4], default=None)
         general_parser.add_argument("--button-break-probability", type=float, default=None)
 
+        general_parser.add_argument("--seed", type=int, default=42, help="Random seed")
+
 
 
 

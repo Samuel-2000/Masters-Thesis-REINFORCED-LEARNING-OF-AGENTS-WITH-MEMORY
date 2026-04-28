@@ -11,11 +11,12 @@ from .environment import VectorGridMazeWorld  # Use the vector-optimized version
 class VectorizedMazeEnv:
     """Vectorized wrapper for multiple maze environments - OPTIMIZED"""
     
-    def __init__(self, 
-                 num_envs: int,
-                 env_config: Dict[str, Any]):
+    def __init__(self,  num_envs: int, env_config: Dict[str, Any], base_seed: int):
         self.num_envs = num_envs
-        self.env_config = env_config
+        #self.env_config = env_config
+
+        self.base_seed = base_seed          # store the base seed
+        self.reset_counter = 0              # count how many times reset() has been called
         
         # Create optimized environments WITHOUT render overhead
         env_config_no_render = env_config.copy()
@@ -38,24 +39,23 @@ class VectorizedMazeEnv:
         self._done_buffer = np.zeros(num_envs, dtype=bool)
         self._trunc_buffer = np.zeros(num_envs, dtype=bool)
     
-    def reset(self, seed: int = None) -> Tuple[np.ndarray, List[Dict]]:
+    def reset(self) -> Tuple[np.ndarray, List[Dict]]:
         """Reset all environments"""
         infos = []
         
         for i, env in enumerate(self.envs):
-            if seed is not None:
-                obs, info = env.reset(seed=seed + i)
-            else:
-                obs, info = env.reset()
-            
-            if i == 0:
-                # Initialize observations array with first observation shape
+            env_seed = self.base_seed + self.reset_counter * self.num_envs + i
+            obs, info = env.reset(seed=env_seed)
+
+            if i == 0: # Initialize observations array with first observation shape
                 self.observations = np.zeros((self.num_envs, obs.shape[0]), dtype=obs.dtype)
             
             self.observations[i] = obs
             infos.append(info)
             self.dones[i] = False
             self.steps[i] = 0
+        
+        self.reset_counter += 1
         
         return self.observations, infos
     
