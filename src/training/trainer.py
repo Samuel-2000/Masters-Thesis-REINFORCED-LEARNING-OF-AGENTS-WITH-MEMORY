@@ -28,7 +28,6 @@ from src.core.constants import (
 # ============================================================================
 # DYNAMIC COMPLEXITY MANAGER
 # ============================================================================
-
 class ComplexityManager:
     """Manages dynamic complexity adjustment based on agent performance"""
     
@@ -58,13 +57,18 @@ class ComplexityManager:
         self.performance_history = deque(maxlen=self.performance_window)
         self._last_performance_score = 0.0
         self.max_rewards_by_stage = {}
-        self.epochs_without_progress = 0  # Tracks stagnation
-        self.last_complexity_increase_epoch = 0   # epoch when complexity last increased
+        self.epochs_without_progress = 0
+        self.last_complexity_increase_epoch = 0
         self.last_max_reward = -float('inf')
+        
+        # Stage switching tracking
+        self.stage_selection_counts = {stage: 0 for stage in self.curriculum_stages}
+        self.total_switches = 0
+        self.linear_cycle_complete = False
         
         # Statistics
         self.adjustments_made = 0
-        self.stage_switches = 0  # Track how many times we switch tasks
+        self.stage_switches = 0
 
     def add_performance(self, reward: float):
         """Add performance metric to history"""
@@ -103,11 +107,10 @@ class ComplexityManager:
             return False
         
         # Check if we have enough performance data
-        if len(self.performance_history) < self.performance_window // 2: # at the beginning of the training
+        if len(self.performance_history) < self.performance_window // 2:
             return False
         
         return True
-
 
     def should_switch_stage(self, epoch: int) -> bool:
         """Check if we should switch to a different task due to stagnation"""
@@ -125,12 +128,12 @@ class ComplexityManager:
         if epoch - self.last_complexity_increase_epoch >= self.stagnation_switch_interval:
             return True
         
-        # Optional: Check for oscillation (could be enhanced with more sophisticated detection)
+        # Optional: Check for oscillation (low performance, low variation)
         if len(self.performance_history) >= self.performance_window:
             recent_std = np.std(list(self.performance_history)[-self.performance_window:])
             recent_mean = np.mean(list(self.performance_history)[-self.performance_window:])
             if recent_std < 0.1 and recent_mean < self.decrease_threshold:
-                return True  # Stuck at low performance with little variation
+                return True
         
         return False
 
@@ -150,88 +153,83 @@ class ComplexityManager:
         
         max_reward = self.max_rewards_by_stage[stage_idx]
         
-        # Avoid division by zero
         if max_reward < 0.1:
             return 0.0
         
-        # Normalize by maximum observed reward for current stage
         score = max(0.0, min(1.0, avg_performance / max_reward))
         self._last_performance_score = score
         return score
 
-    def switch_to_next_stage(self) -> Dict[str, Any]:
-        """Switch to next task in curriculum, maintaining each task's complexity"""
+    def switch_to_next_stage(self, epoch: int) -> Dict[str, Any]:
+        """
+        Switch stage:
+        - First cycle: strictly linear progression through curriculum.
+        - After cycle: probabilistic based on low complexity and low selection frequency.
+        """
         old_stage_idx = self.current_stage_idx
         old_stage = self.curriculum_stages[old_stage_idx]
         old_complexity = self.stage_complexities[old_stage]
-        
-        # Calculate weighted probabilities for next stage
-        # Higher probability to stay in current stage or progress to next
-        # But always allow some probability to return to earlier stages for consolidation
-        
-        stage_weights = np.zeros(len(self.curriculum_stages))
-        
-        # Base weight for each stage depends on how recently we visited it
-        # and its current complexity level
-        for i, stage in enumerate(self.curriculum_stages):
-            # Recent visit penalty - avoid bouncing too quickly
-            recent_penalty = 1.0
-            if i == old_stage_idx:
-                recent_penalty = 0.3  # Less likely to stay in same stage if stagnating
-            elif i == (old_stage_idx - 1) % len(self.curriculum_stages):
-                recent_penalty = 0.5  # Less likely to go back immediately
-            
-            # Complexity-based weight - prefer stages at moderate complexity
-            stage_complexity = self.stage_complexities[stage]
-            complexity_weight = 1.0 - abs(stage_complexity - 0.5)  # Prefer ~0.5 complexity
-            
-            # Distance weight - prefer next stage in curriculum
-            distance = (i - old_stage_idx) % len(self.curriculum_stages)
-            if distance == 1:
-                distance_weight = 2.0  # Most likely: progress forward
-            elif distance == 0:
-                distance_weight = 1.0  # Same stage
-            else:
-                distance_weight = 0.7  # Going backward or skipping
-            
-            stage_weights[i] = recent_penalty * complexity_weight * distance_weight
-        
-        # Normalize to probabilities
-        stage_probs = stage_weights / stage_weights.sum()
-        
-        # Sample next stage
-        next_idx = np.random.choice(len(self.curriculum_stages), p=stage_probs)
-        
-        self.current_stage_idx = next_idx
-        new_stage = self.curriculum_stages[next_idx]
-        new_complexity = self.stage_complexities[new_stage]
-        
-        # Reset stagnation tracking
+
+        # ---------- FIRST CYCLE: LINEAR PROGRESSION ----------
+        if not self.linear_cycle_complete:
+            # Move to next stage in order (cyclic)
+            next_idx = (old_stage_idx + 1) % len(self.curriculum_stages)
+            self.current_stage_idx = next_idx
+            new_stage = self.curriculum_stages[next_idx]
+            new_complexity = self.stage_complexities[new_stage]
+
+            # If we just completed one full cycle (wrapped back to start)
+            if next_idx == 0:
+                self.linear_cycle_complete = True
+
+            reason = "Linear progression (first cycle)"
+            probs = None
+
+        # ---------- AFTER CYCLE: PROBABILISTIC ----------
+        else:
+            epsilon = 0.1   # prevents zero weights
+            weights = []
+            for stage in self.curriculum_stages:
+                complexity = self.stage_complexities[stage]
+                freq = self.stage_selection_counts[stage] / (self.total_switches + 1)
+                weight = (1.0 - complexity + epsilon) * (1.0 - freq + epsilon)
+                weights.append(weight)
+            probs = np.array(weights) / np.sum(weights)
+            next_idx = np.random.choice(len(self.curriculum_stages), p=probs)
+            self.current_stage_idx = next_idx
+            new_stage = self.curriculum_stages[next_idx]
+            new_complexity = self.stage_complexities[new_stage]
+            reason = f"Probabilistic (complexity={new_complexity:.2f}, freq={self.stage_selection_counts[new_stage]/(self.total_switches+1):.2f})"
+
+        # --- Update selection counts and reset stagnation ---
+        self.stage_selection_counts[new_stage] += 1
+        self.total_switches += 1
+
         self.epochs_without_progress = 0
+        self.last_complexity_increase_epoch = epoch
         self.last_max_reward = -float('inf')
         self.performance_history.clear()
         self.stage_switches += 1
-        
+
         adjustment_info = {
-            "action": "switched_stage_due_to_stagnation",
+            "action": "switched_stage",
             "old_stage": old_stage,
             "new_stage": new_stage,
             "old_complexity": old_complexity,
             "new_complexity": new_complexity,
-            "reason": f"Stagnation for {self.epochs_without_progress} epochs",
-            "stage_probs": stage_probs.tolist()  # For debugging
+            "reason": reason,
+            "stage_probs": probs.tolist() if probs is not None else None
         }
-        
         return adjustment_info
-    
+
     def adjust_complexity(self, epoch: int) -> Optional[Dict[str, Any]]:
         """Adjust complexity based on performance, with task switching for stagnation"""
         if not self.should_adjust(epoch):
             return None
         
         # First check if we should switch tasks due to stagnation
-        if self.should_switch_stage(epoch):  # NEW: Pass epoch parameter
-            adjustment_info = self.switch_to_next_stage()
+        if self.should_switch_stage(epoch):
+            adjustment_info = self.switch_to_next_stage(epoch)
             self.adjustments_made += 1
             return adjustment_info
         
@@ -271,10 +269,10 @@ class ComplexityManager:
         adjustment_info["new_complexity"] = new_complexity
         self.stage_complexities[current_stage] = new_complexity
         self.adjustments_made += 1
-        self.performance_history.clear()  # Reset performance history after adjustment
+        self.performance_history.clear()
         
         return adjustment_info
-    
+
     def get_environment_config(self) -> Dict[str, Any]:
         """Get environment configuration with current complexity settings"""
         env_config = self.config['environment'].copy()
@@ -286,25 +284,21 @@ class ComplexityManager:
             
             # CRITICAL: Set door parameters appropriately for each stage
             if current_stage == 'basic':
-                # Basic stage: no doors
                 env_config['n_doors'] = 0
                 env_config['n_buttons_per_door'] = 0
                 env_config['button_break_probability'] = 0.0
                 
             elif current_stage == 'doors':
-                # Doors stage: periodic doors, no buttons
                 env_config['n_doors'] = -1
                 env_config['n_buttons_per_door'] = 0
                 env_config['button_break_probability'] = 0.0
                 
             elif current_stage == 'buttons':
-                # Buttons stage: doors with buttons
                 env_config['n_doors'] = -1
                 env_config['n_buttons_per_door'] = -1
                 env_config['button_break_probability'] = -1.0
                 
             elif current_stage == 'complex':
-                # Complex stage: mix of periodic and button doors
                 env_config['n_doors'] = -1
                 env_config['n_buttons_per_door'] = -1
                 env_config['button_break_probability'] = -1.0
@@ -326,9 +320,12 @@ class ComplexityManager:
             "adjustments_made": self.adjustments_made,
             "stage_switches": self.stage_switches,
             "epochs_without_progress": self.epochs_without_progress,
-            "performance_score": self.calculate_performance_score(), # if self.performance_history else 0.0,
+            "performance_score": self.calculate_performance_score(),
             "max_rewards_by_stage": self.max_rewards_by_stage,
-            "basic_min_complexity_reached": self.stage_complexities['basic'] >= self.min_basic_complexity
+            "basic_min_complexity_reached": self.stage_complexities['basic'] >= self.min_basic_complexity,
+            "linear_cycle_complete": self.linear_cycle_complete,
+            "stage_selection_counts": self.stage_selection_counts,
+            "total_switches": self.total_switches
         }
 
 
@@ -642,11 +639,28 @@ class ParallelTrainer:
         """Get the current environment configuration (static for base trainer)"""
         return self.config['environment'].copy()
     
+
     def _test_valid(self, epochs: int = 10) -> Dict[str, float]:
-        """Run `epochs` test epochs, each processing `batch_size` parallel epochs."""
+        """Run `epochs` test epochs, each processing `batch_size` parallel epochs.
+        Always tests on complex stage at maximum complexity (1.0) using fixed seeds.
+        """
         self.agent.network.eval()
-        env_config = self.get_environment_config()
-        env_config['render_size'] = 0
+
+        # env_config = self.get_environment_config()
+
+        # Build test environment configuration: always complex, complexity=1.0
+        test_env_config = self.config['environment'].copy()
+        test_env_config['task_class'] = 'complex'
+        test_env_config['complexity_level'] = 1.0
+        # Set door/button parameters for complex stage
+        test_env_config['n_doors'] = -1
+        test_env_config['n_buttons_per_door'] = -1
+        test_env_config['button_break_probability'] = -1.0
+
+        test_env_config['render_size'] = 0
+
+        # Use a fixed seed offset to guarantee identical environments each test call
+        test_seed = self.base_seed + 12345  # any constant offset works
 
         total_epochs = epochs * self.batch_size
         all_rewards = []
@@ -654,7 +668,11 @@ class ParallelTrainer:
         max_steps = 0
 
         for _ in range(epochs):
-            test_env = VectorizedMazeEnv(num_envs=self.batch_size, env_config=env_config, base_seed=self.base_seed)
+            test_env = VectorizedMazeEnv(
+                num_envs=self.batch_size,
+                env_config=test_env_config,
+                base_seed=test_seed   # same seed every time
+            )
             max_steps = test_env.envs[0].max_steps
             obs_array, _ = test_env.reset()
             obs_t = torch.tensor(obs_array, dtype=torch.long, device=self.device).unsqueeze(1)
@@ -686,6 +704,7 @@ class ParallelTrainer:
             'avg_length': avg_length
         }
     
+
     def _save_model(self, name: str):
         save_dir = Path(self.config['experiment']['save_dir'])
         save_dir.mkdir(exist_ok=True)
@@ -727,51 +746,35 @@ class ParallelTrainer:
 
 
     def _plot_metrics(self):
-        """Save each plot as a separate file in a folder named after the experiment."""
+        """Save each plot as a separate file in a folder named after the experiment.
+        All data are shown raw (no smoothing).
+        """
         import matplotlib.pyplot as plt
 
         # Create directory for this experiment's plots
         plots_dir = Path('results/plots') / self.experiment_name
         plots_dir.mkdir(parents=True, exist_ok=True)
 
-        # Helper to save a plot
         def save_plot(fig, name):
             path = plots_dir / f"{name}.png"
             fig.savefig(str(path), dpi=150, bbox_inches='tight')
             plt.close(fig)
             self.logger.info(f"Saved plot to {path}")
 
-
-        # ---- 1. Training Rewards (raw + smoothed) + Test Rewards ----
+        # ---- 1. Training Rewards (raw) + Test Rewards ----
         fig, ax = plt.subplots(figsize=(8, 5))
         rewards = np.array(self.metrics['train_rewards'])
         epochs = np.arange(len(rewards))
-        ax.plot(epochs, rewards, alpha=0.5, color='gray', linewidth=0.5, label='Train Reward (raw)')
-        
-        # Smoothed with expanding window until size reaches 100, then rolling window of 100
-        if len(rewards) > 0:
-            smoothed = np.zeros_like(rewards, dtype=float)
-            window = 100
-            for i in range(len(rewards)):
-                if i < window:
-                    # Expanding average: average all rewards up to i
-                    smoothed[i] = np.mean(rewards[:i+1])
-                else:
-                    # Rolling window of size window
-                    smoothed[i] = np.mean(rewards[i-window+1:i+1])
-            ax.plot(epochs, smoothed, 'b-', linewidth=2, label=f'Train Reward (smoothed, window={window})')
+        ax.plot(epochs, rewards, 'b-', alpha=0.7, linewidth=1, label='Train Reward (raw)')
         
         # Test rewards (if available)
         if 'test_rewards' in self.metrics and len(self.metrics['test_rewards']) > 0:
             test_rewards = self.metrics['test_rewards']
             test_interval = self.config['training']['test_interval']
-            # Ensure x-values start at 0 and align with the epochs when tests were performed
-            # First test is at epoch 0, then at test_interval, 2*test_interval, ...
             x_vals = np.arange(0, len(test_rewards) * test_interval, test_interval)
-            # If test_interval is 0? Not possible. Also handle case where first test not at epoch 0? Our training loop does epoch % test_interval == 0, so epoch 0 is included.
             ax.plot(x_vals, test_rewards, 'g-o', linewidth=1.5, markersize=6, label='Test Reward')
         
-        ax.set_title('Training & Test Rewards')
+        ax.set_title('Training & Test Rewards (raw)')
         ax.set_xlabel('Epoch')
         ax.set_ylabel('Reward')
         ax.grid(True, alpha=0.3)
@@ -790,7 +793,7 @@ class ParallelTrainer:
         ax.grid(True, alpha=0.3)
         save_plot(fig, 'losses')
 
-        # ---- 2. Auxiliary Losses (if any) ----
+        # ---- 3. Auxiliary Losses (if any) ----
         has_aux = 'aux_losses' in self.metrics and len(self.metrics['aux_losses']) > 0
         if has_aux:
             fig, ax = plt.subplots(figsize=(8, 5))
@@ -807,11 +810,11 @@ class ParallelTrainer:
             ax.grid(True, alpha=0.3)
             save_plot(fig, 'aux_losses')
 
-        # ---- 3. Complexity & Task Class Progression (if complexity enabled) ----
+        # ---- 4. Complexity & Task Class Progression (raw) ----
         has_complexity = 'complexity_history' in self.metrics and len(self.metrics['complexity_history']) > 0
         if has_complexity:
             fig, ax = plt.subplots(figsize=(8, 5))
-            ax.plot(self.metrics['complexity_history'], 'b-', linewidth=2, label='Complexity')
+            ax.plot(self.metrics['complexity_history'], 'b-', linewidth=1, label='Complexity')
             ax.set_xlabel('Epoch')
             ax.set_ylabel('Complexity Level', color='b')
             ax.tick_params(axis='y', labelcolor='b')
@@ -833,48 +836,42 @@ class ParallelTrainer:
                 ax2.legend(lines1 + lines2, labels1 + labels2, loc='upper left')
             else:
                 ax.legend()
-            ax.set_title('Complexity Progression')
+            ax.set_title('Complexity Progression (raw)')
             save_plot(fig, 'complexity')
 
-        # ---- 4. Performance Scores (x-axis multiplied by window) ----
+        # ---- 5. Performance Scores (colored by config change) ----
         has_perf_scores = 'performance_scores' in self.metrics and len(self.metrics['performance_scores']) > 0
         if has_perf_scores:
             fig, ax = plt.subplots(figsize=(8, 5))
-            
             scores = np.array(self.metrics['performance_scores'])
-            # Multiply index by performance_window to get actual epoch
-            window = self.complexity_manager.performance_window  # e.g., 10
-            epochs = np.arange(len(scores)) * window  # [0, 10, 20, ...]
-            
-            # Complexity and task histories are full-length; we need values at these epochs
+            window = self.complexity_manager.performance_window
+            # Each performance score corresponds to an epoch that is a multiple of window
+            perf_epochs = np.arange(len(scores)) * window
+            # Get raw complexity and task at those exact epochs
             full_complexities = np.array(self.metrics['complexity_history'])
             full_tasks = np.array(self.metrics['task_class_history'])
-            # Index by epoch (clip to avoid out-of-bound)
-            complexities = full_complexities[epochs]
-            tasks = full_tasks[epochs]
+            complexities_at_perf = full_complexities[perf_epochs]
+            tasks_at_perf = full_tasks[perf_epochs]
             
-            # Detect change points (where complexity or task changes between consecutive scores)
+            # Detect change points where complexity or task changed
             change_indices = []
-            for i in range(1, len(complexities)):
-                if abs(complexities[i] - complexities[i-1]) > 1e-6 or tasks[i] != tasks[i-1]:
+            for i in range(1, len(complexities_at_perf)):
+                if abs(complexities_at_perf[i] - complexities_at_perf[i-1]) > 1e-6 or tasks_at_perf[i] != tasks_at_perf[i-1]:
                     change_indices.append(i)
             
-            # Plot segments with alternating colors
             colors = ['orange', 'blue']
             start = 0
             for idx, split in enumerate(change_indices):
-                seg_x = epochs[start:split]
+                seg_x = perf_epochs[start:split]
                 seg_y = scores[start:split]
                 if len(seg_x) > 0:
                     ax.plot(seg_x, seg_y, color=colors[idx % 2], linewidth=1.5)
-                    ax.axvline(x=epochs[split], color='gray', linestyle=':', alpha=0.5)
+                    ax.axvline(x=perf_epochs[split], color='gray', linestyle=':', alpha=0.5)
                 start = split
-            # Last segment
-            if start < len(epochs):
-                ax.plot(epochs[start:], scores[start:], 
+            if start < len(perf_epochs):
+                ax.plot(perf_epochs[start:], scores[start:], 
                         color=colors[len(change_indices) % 2], linewidth=1.5)
             
-            # Threshold lines
             if hasattr(self, 'complexity_manager') and self.complexity_manager is not None:
                 inc = self.complexity_manager.increase_threshold
                 dec = self.complexity_manager.decrease_threshold
@@ -889,29 +886,26 @@ class ParallelTrainer:
             ax.legend(fontsize=9)
             save_plot(fig, 'performance_scores')
 
-        # ---- 5. Complexity vs Reward Correlation (if enough data) ----
-        if has_complexity and len(self.metrics['train_rewards']) > 100:
+        # ---- 6. Complexity vs Reward (raw complexity, raw reward) ----
+        if has_complexity and len(self.metrics['train_rewards']) > 10:
             fig, ax = plt.subplots(figsize=(8, 5))
-            window = min(100, len(self.metrics['train_rewards']) // 10)
-            if window > 1:
-                smoothed_r = np.convolve(self.metrics['train_rewards'],
-                                        np.ones(window)/window, mode='valid')
-                smoothed_c = np.convolve(self.metrics['complexity_history'],
-                                        np.ones(window)/window, mode='valid')
-                min_len = min(len(smoothed_r), len(smoothed_c))
-                sc = ax.scatter(smoothed_c[:min_len], smoothed_r[:min_len],
-                                c=range(min_len), cmap='viridis', alpha=0.7, s=15)
-                plt.colorbar(sc, ax=ax, label='Epoch (smoothed)')
-                correlation = np.corrcoef(smoothed_c[:min_len], smoothed_r[:min_len])[0, 1]
-                ax.set_title(f'Complexity vs Reward (corr: {correlation:.3f})')
+            complexities = np.array(self.metrics['complexity_history'])
+            rewards_raw = np.array(self.metrics['train_rewards'])
+            # Use raw values directly
+            sc = ax.scatter(complexities, rewards_raw, c=range(len(complexities)), 
+                            cmap='viridis', alpha=0.7, s=10)
+            plt.colorbar(sc, ax=ax, label='Epoch')
+            if len(complexities) > 1 and len(rewards_raw) > 1:
+                correlation = np.corrcoef(complexities, rewards_raw)[0, 1]
+                ax.set_title(f'Complexity vs Reward (raw, corr: {correlation:.3f})')
             else:
-                ax.text(0.5, 0.5, 'Not enough data', ha='center', va='center', transform=ax.transAxes)
+                ax.set_title('Complexity vs Reward (raw)')
             ax.set_xlabel('Complexity Level')
-            ax.set_ylabel('Smoothed Reward')
+            ax.set_ylabel('Reward')
             ax.grid(True, alpha=0.3)
             save_plot(fig, 'complexity_vs_reward')
 
-        # ---- 6. Reward vs Complexity per stage (smoothed, matching complexity_vs_reward) ----
+        # ---- 7. Reward vs Complexity per stage (raw data) ----
         has_stage_highlight = ('task_class_history' in self.metrics and 
                             len(self.metrics['task_class_history']) > 0)
         if has_stage_highlight:
@@ -923,52 +917,25 @@ class ParallelTrainer:
             complexities_raw = np.array(self.metrics['complexity_history'])
             stages_raw = np.array(self.metrics['task_class_history'])
             
-            # Apply same smoothing as in global complexity_vs_reward plot
-            window = min(100, len(rewards_raw) // 10)
-            if window > 1:
-                # Convolve with box filter of length window (valid mode)
-                kernel = np.ones(window) / window
-                smoothed_rewards = np.convolve(rewards_raw, kernel, mode='valid')
-                smoothed_complexities = np.convolve(complexities_raw, kernel, mode='valid')
-                # Map stage labels to smoothed indices: smoothed index i corresponds to raw epoch i + window - 1
-                offset = window - 1
-                stages_smoothed = stages_raw[offset:offset + len(smoothed_rewards)]
-                # Epoch numbers for smoothed data (starting from offset)
-                epochs_smoothed = np.arange(offset, offset + len(smoothed_rewards))
-            else:
-                # Not enough data for smoothing; use raw data
-                smoothed_rewards = rewards_raw
-                smoothed_complexities = complexities_raw
-                stages_smoothed = stages_raw
-                epochs_smoothed = np.arange(len(rewards_raw))
-                window = 1
-            
-            # For each stage, create a plot
             for stage in unique_stages:
                 fig, ax = plt.subplots(figsize=(8, 5))
-                
-                # Mask for this stage (on smoothed indices)
-                mask = (stages_smoothed == stage)
-                
-                # Plot all points as faint background (all smoothed points)
-                ax.scatter(smoothed_complexities, smoothed_rewards,
-                           c='gray', alpha=0.2, s=10, label='All epochs (smoothed)')
-                
-                # Highlight this stage's points with color mapped to epoch progression
-                sc = ax.scatter(smoothed_complexities[mask], smoothed_rewards[mask],
-                                c=epochs_smoothed[mask], cmap='viridis',
-                                alpha=0.8, s=40, label=f'{stage.capitalize()} active')
-                
+                mask = (stages_raw == stage)
+                # Scatter all points as faint background
+                ax.scatter(complexities_raw, rewards_raw, c='gray', alpha=0.2, s=10, label='All epochs')
+                # Highlight this stage's points with color mapped to epoch
+                epochs_of_stage = np.arange(len(rewards_raw))[mask]
+                sc = ax.scatter(complexities_raw[mask], rewards_raw[mask],
+                                c=epochs_of_stage, cmap='viridis',
+                                alpha=0.8, s=30, label=f'{stage.capitalize()} active')
                 cbar = plt.colorbar(sc, ax=ax)
-                cbar.set_label('Epoch (original index)')
+                cbar.set_label('Epoch')
                 
-                # Optional: trend line for this stage
+                # Optional trend line
                 if np.sum(mask) > 1:
-                    x_vals = smoothed_complexities[mask]
-                    y_vals = smoothed_rewards[mask]
-                    # Remove any NaN or inf values
+                    x_vals = complexities_raw[mask]
+                    y_vals = rewards_raw[mask]
                     valid = ~(np.isnan(x_vals) | np.isnan(y_vals) | 
-                              np.isinf(x_vals) | np.isinf(y_vals))
+                            np.isinf(x_vals) | np.isinf(y_vals))
                     x_vals = x_vals[valid]
                     y_vals = y_vals[valid]
                     if len(x_vals) >= 2 and np.std(x_vals) > 1e-6:
@@ -979,15 +946,14 @@ class ParallelTrainer:
                             ax.plot(x_line, p(x_line), 'r--', linewidth=2,
                                     label=f'Trend: {z[0]:.2f}*x + {z[1]:.2f}')
                         except (np.linalg.LinAlgError, ValueError):
-                            # Skip if fit fails (e.g., singular matrix)
                             pass
-                
-                ax.set_title(f'Reward vs Complexity – {stage.capitalize()} stage (smoothed, w={window})')
-                ax.set_xlabel('Complexity Level (smoothed)')
-                ax.set_ylabel('Reward (smoothed)')
+                ax.set_title(f'Reward vs Complexity – {stage.capitalize()} stage (raw data)')
+                ax.set_xlabel('Complexity Level')
+                ax.set_ylabel('Reward')
                 ax.grid(True, alpha=0.3)
                 ax.legend()
                 save_plot(fig, f'reward_vs_complexity_stage_{stage}')
+
 
     def _print_training_summary(self, start_time: float):
         """Print training summary"""
