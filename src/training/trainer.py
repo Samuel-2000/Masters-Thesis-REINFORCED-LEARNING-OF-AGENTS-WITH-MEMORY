@@ -27,7 +27,7 @@ from src.core.constants import (
 )
 
 # ============================================================================
-# STANDALONE PLOTTING FUNCTION (with safe array length)
+# STANDALONE PLOTTING FUNCTION (with safe array length and exact test epochs)
 # ============================================================================
 def generate_plots_from_metrics(metrics: Dict[str, Any], plots_dir: Path):
     """Generate all training plots from a metrics dictionary."""
@@ -40,16 +40,20 @@ def generate_plots_from_metrics(metrics: Dict[str, Any], plots_dir: Path):
         fig.savefig(str(path), dpi=150, bbox_inches='tight')
         plt.close(fig)
 
-    # ---- 1. Training Rewards (raw) + Test Rewards ----
+    # ---- 1. Training Rewards (raw) + Test Rewards (exact epochs) ----
     fig, ax = plt.subplots(figsize=(8, 5))
     rewards = np.array(metrics['train_rewards'])
     epochs = np.arange(len(rewards))
     ax.plot(epochs, rewards, 'b-', alpha=0.7, linewidth=1, label='Train Reward (raw)')
     if 'test_rewards' in metrics and len(metrics['test_rewards']) > 0:
         test_rewards = metrics['test_rewards']
-        test_interval = max(1, len(rewards) // len(test_rewards))
-        x_vals = np.arange(0, len(test_rewards) * test_interval, test_interval)
-        ax.plot(x_vals, test_rewards, 'g-o', linewidth=1.5, markersize=6, label='Test Reward')
+        if 'test_epochs' in metrics and len(metrics['test_epochs']) == len(test_rewards):
+            test_epochs = metrics['test_epochs']
+        else:
+            # fallback for old checkpoints
+            test_interval = max(1, len(rewards) // len(test_rewards))
+            test_epochs = np.arange(0, len(test_rewards) * test_interval, test_interval)
+        ax.plot(test_epochs, test_rewards, 'g-o', linewidth=1.5, markersize=6, label='Test Reward')
     ax.set_title('Training & Test Rewards (raw)')
     ax.set_xlabel('Epoch')
     ax.set_ylabel('Reward')
@@ -646,6 +650,7 @@ class ParallelTrainer:
             'aux_losses': [],
             'energy_losses': [],
             'obs_losses': [],
+            'test_epochs': [],          # store epoch at which test was performed
             'test_rewards': [],
             'best_reward': -np.inf,
             'timing': {
@@ -940,16 +945,34 @@ class ParallelTrainer:
         """Load training state from a checkpoint file."""
         checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
         self.metrics = checkpoint['metrics']
+        
+        # Migrate old checkpoints (without test_epochs)
+        if 'test_epochs' not in self.metrics:
+            test_interval = self.config['training'].get('test_interval', 100)
+            num_tests = len(self.metrics['test_rewards'])
+            self.metrics['test_epochs'] = []
+            for i in range(1, num_tests + 1):
+                epoch = i * test_interval
+                if epoch < len(self.metrics['train_rewards']):
+                    self.metrics['test_epochs'].append(epoch)
+                else:
+                    break
+            if len(self.metrics['test_epochs']) != len(self.metrics['test_rewards']):
+                self.metrics['test_epochs'] = []
+        
         self.optimizer.load_state_dict(checkpoint['optimizer_state'])
         self.lr_scheduler.load_state_dict(checkpoint['scheduler_state'])
         if 'model_state_dict' in checkpoint:
             self.agent.network.load_state_dict(checkpoint['model_state_dict'], strict=False)
             print(f"Loaded model weights from checkpoint {checkpoint_path}")
+        
         if hasattr(self, 'complexity_manager') and 'complexity_manager_state' in checkpoint:
             cm_state = checkpoint['complexity_manager_state']
             self.complexity_manager.current_stage_idx = cm_state['current_stage_idx']
-            self.complexity_manager.performance_history = deque(cm_state['performance_history'],
-                                                                maxlen=self.complexity_manager.performance_window)
+            self.complexity_manager.performance_history = deque(
+                cm_state['performance_history'],
+                maxlen=self.complexity_manager.performance_window
+            )
             self.complexity_manager.adjustments_made = cm_state['adjustments_made']
             if 'stage_complexities' in cm_state:
                 self.complexity_manager.stage_complexities = cm_state['stage_complexities']
@@ -961,6 +984,7 @@ class ParallelTrainer:
                 self.complexity_manager.last_complexity_increase_epoch = cm_state['last_complexity_increase_epoch']
             if 'last_max_reward' in cm_state:
                 self.complexity_manager.last_max_reward = cm_state['last_max_reward']
+        
         start_epoch = len(self.metrics['train_rewards'])
         self.logger.info(f"Resumed training from checkpoint at epoch {start_epoch}")
 
@@ -992,17 +1016,17 @@ class ParallelTrainer:
         checkpoint['config']['experiment']['base_name'] = self.base_name
         checkpoint['config']['experiment']['date_subfolder'] = self.date_subfolder
         
-        #if hasattr(self, 'complexity_manager'):
-        #    checkpoint['complexity_manager_state'] = {
-        #        'current_stage_idx': self.complexity_manager.current_stage_idx,
-        #        'performance_history': list(self.complexity_manager.performance_history),
-        #        'adjustments_made': self.complexity_manager.adjustments_made,
-        #        'stage_complexities': self.complexity_manager.stage_complexities,
-        #        'max_rewards_by_stage': self.complexity_manager.max_rewards_by_stage,
-        #        'epochs_without_progress': self.complexity_manager.epochs_without_progress,
-        #        'last_complexity_increase_epoch': self.complexity_manager.last_complexity_increase_epoch,
-        #        'last_max_reward': self.complexity_manager.last_max_reward,
-        #    }
+        if hasattr(self, 'complexity_manager'):
+            checkpoint['complexity_manager_state'] = {
+                'current_stage_idx': self.complexity_manager.current_stage_idx,
+                'performance_history': list(self.complexity_manager.performance_history),
+                'adjustments_made': self.complexity_manager.adjustments_made,
+                'stage_complexities': self.complexity_manager.stage_complexities,
+                'max_rewards_by_stage': self.complexity_manager.max_rewards_by_stage,
+                'epochs_without_progress': self.complexity_manager.epochs_without_progress,
+                'last_complexity_increase_epoch': self.complexity_manager.last_complexity_increase_epoch,
+                'last_max_reward': self.complexity_manager.last_max_reward,
+            }
         torch.save(checkpoint, str(checkpoint_path))
         self.logger.info(f"Saved checkpoint to {checkpoint_path}")
 
@@ -1018,6 +1042,7 @@ class ParallelTrainer:
         np.savez(str(self.metrics_path),
                 train_rewards=self.metrics['train_rewards'],
                 train_losses=self.metrics['train_losses'],
+                test_epochs=self.metrics['test_epochs'],
                 test_rewards=self.metrics['test_rewards'],
                 timing_collection=self.metrics['timing']['collection'],
                 timing_training=self.metrics['timing']['training'],
@@ -1054,6 +1079,18 @@ class ParallelTrainer:
         test_interval = training_config['test_interval']
         
         start_epoch = len(self.metrics['train_rewards'])
+
+        # Perform initial test at epoch 0 if never tested before (fresh run)
+        if len(self.metrics['test_epochs']) == 0 and len(self.metrics['test_rewards']) == 0:
+            self.logger.info("Running initial test at epoch 0...")
+            test_metrics = self._test_valid(epochs=4)
+            self.metrics['test_epochs'].append(0)
+            self.metrics['test_rewards'].append(test_metrics['reward'])
+            if test_metrics['reward'] > self.metrics['best_reward']:
+                self.metrics['best_reward'] = test_metrics['reward']
+                self._save_model('best')
+                self.logger.info(f"Initial best model with reward: {test_metrics['reward']:.2f}")
+
         # If already at or beyond target, skip training
         if start_epoch >= epochs:
             self.logger.info(f"Already at epoch {start_epoch} >= {epochs}, no training performed.")
@@ -1082,14 +1119,17 @@ class ParallelTrainer:
             self.metrics['timing']['training'].append(train_time)
             self.metrics['timing']['total'].append(time.time() - epoch_start)
             
+            # Test with exact epoch tracking
             if epoch % test_interval == 0 and epoch != 0:
-                test_metrics = self._test_valid(epochs=4)
-                test_reward = test_metrics['reward']
-                self.metrics['test_rewards'].append(test_reward)
-                if test_reward > self.metrics['best_reward']:
-                    self.metrics['best_reward'] = test_reward
-                    self._save_model('best')
-                    self.logger.info(f"New best model with reward: {test_reward:.2f}")
+                if epoch not in self.metrics['test_epochs']:  # avoid duplicate after resume
+                    test_metrics = self._test_valid(epochs=4)
+                    test_reward = test_metrics['reward']
+                    self.metrics['test_epochs'].append(epoch)
+                    self.metrics['test_rewards'].append(test_reward)
+                    if test_reward > self.metrics['best_reward']:
+                        self.metrics['best_reward'] = test_reward
+                        self._save_model('best')
+                        self.logger.info(f"New best model with reward: {test_reward:.2f}")
 
             if epoch % save_interval == 0 and epoch != 0:
                 self._save_model(f'epoch_{epoch:06d}')
@@ -1109,11 +1149,10 @@ class ParallelTrainer:
         # Final test only if we actually trained new epochs and the last epoch wasn't already a test epoch
         if len(self.metrics['train_rewards']) > start_epoch:
             last_epoch = len(self.metrics['train_rewards']) - 1
-            # Check if the last epoch was already tested (test_interval divides last_epoch)
-            is_test_epoch = (test_interval > 0 and last_epoch % test_interval == 0)
-            if not is_test_epoch:
+            if last_epoch not in self.metrics['test_epochs']:
                 test_metrics = self._test_valid(epochs=4)
                 test_reward = test_metrics['reward']
+                self.metrics['test_epochs'].append(last_epoch)
                 self.metrics['test_rewards'].append(test_reward)
                 if test_reward > self.metrics['best_reward']:
                     self.metrics['best_reward'] = test_reward
@@ -1139,15 +1178,16 @@ class AdaptiveParallelTrainer(ParallelTrainer):
         self.complexity_manager = ComplexityManager(config)
         super().__init__(config)
         
+        # If we resumed a checkpoint that already contains these metrics, do not reset them.
+        if 'complexity_history' not in self.metrics:
+            self.metrics['complexity_history'] = []
+            self.metrics['task_class_history'] = []
+            self.metrics['performance_scores'] = []
+        
         # Recreate environment with complexity manager's config (overrides the base environment)
         if hasattr(self, 'vector_env'):
             self.vector_env.close()
         self.vector_env = self._create_vectorized_env()
-        
-        # Extend metrics for complexity tracking
-        self.metrics['complexity_history'] = []
-        self.metrics['task_class_history'] = []
-        self.metrics['performance_scores'] = []
         
         # Log initial status
         self.logger.info(f"Dynamic complexity enabled: {self.complexity_manager.get_status()}")
@@ -1297,6 +1337,7 @@ class AdaptiveParallelTrainer(ParallelTrainer):
         np.savez(str(self.metrics_path),
                 train_rewards=self.metrics['train_rewards'],
                 train_losses=self.metrics['train_losses'],
+                test_epochs=self.metrics['test_epochs'],
                 test_rewards=self.metrics['test_rewards'],
                 complexity_history=self.metrics['complexity_history'],
                 task_class_history=task_class_numeric,
@@ -1351,6 +1392,18 @@ class AdaptiveParallelTrainer(ParallelTrainer):
         test_interval = training_config['test_interval']
         
         start_epoch = len(self.metrics['train_rewards'])
+        
+        # Perform initial test at epoch 0 if never tested before (fresh run)
+        if len(self.metrics['test_epochs']) == 0 and len(self.metrics['test_rewards']) == 0:
+            self.logger.info("Running initial test at epoch 0...")
+            test_metrics = self._test_valid(epochs=4)
+            self.metrics['test_epochs'].append(0)
+            self.metrics['test_rewards'].append(test_metrics['reward'])
+            if test_metrics['reward'] > self.metrics['best_reward']:
+                self.metrics['best_reward'] = test_metrics['reward']
+                self._save_model('best')
+                self.logger.info(f"Initial best model with reward: {test_metrics['reward']:.2f}")
+
         # If already at or beyond target, skip training
         if start_epoch >= epochs:
             self.logger.info(f"Already at epoch {start_epoch} >= {epochs}, no training performed.")
@@ -1417,14 +1470,17 @@ class AdaptiveParallelTrainer(ParallelTrainer):
             self.metrics['complexity_history'].append(self.complexity_manager.get_current_complexity())
             self.metrics['task_class_history'].append(self.complexity_manager.get_current_task_class())
             
+            # Test with exact epoch tracking
             if epoch % test_interval == 0 and epoch != 0:
-                test_metrics = self._test_valid(epochs=4)
-                test_reward = test_metrics['reward']
-                self.metrics['test_rewards'].append(test_reward)
-                if test_reward > self.metrics['best_reward']:
-                    self.metrics['best_reward'] = test_reward
-                    self._save_model('best')
-                    self.logger.info(f"New best model with reward: {test_reward:.2f}")
+                if epoch not in self.metrics['test_epochs']:  # avoid duplicate after resume
+                    test_metrics = self._test_valid(epochs=4)
+                    test_reward = test_metrics['reward']
+                    self.metrics['test_epochs'].append(epoch)
+                    self.metrics['test_rewards'].append(test_reward)
+                    if test_reward > self.metrics['best_reward']:
+                        self.metrics['best_reward'] = test_reward
+                        self._save_model('best')
+                        self.logger.info(f"New best model with reward: {test_reward:.2f}")
 
             if epoch % save_interval == 0 and epoch != 0:
                 self._save_model(f'epoch_{epoch:06d}')
@@ -1448,11 +1504,10 @@ class AdaptiveParallelTrainer(ParallelTrainer):
         # Final test only if we actually trained new epochs and the last epoch wasn't already a test epoch
         if len(self.metrics['train_rewards']) > start_epoch:
             last_epoch = len(self.metrics['train_rewards']) - 1
-            # Check if the last epoch was already tested (test_interval divides last_epoch)
-            is_test_epoch = (test_interval > 0 and last_epoch % test_interval == 0)
-            if not is_test_epoch:
+            if last_epoch not in self.metrics['test_epochs']:
                 test_metrics = self._test_valid(epochs=4)
                 test_reward = test_metrics['reward']
+                self.metrics['test_epochs'].append(last_epoch)
                 self.metrics['test_rewards'].append(test_reward)
                 if test_reward > self.metrics['best_reward']:
                     self.metrics['best_reward'] = test_reward
