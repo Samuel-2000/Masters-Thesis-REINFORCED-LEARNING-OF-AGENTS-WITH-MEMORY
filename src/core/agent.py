@@ -138,10 +138,28 @@ class Agent:
     
     @classmethod
     def load(cls, path: str, device: str = 'auto'):
+        # MODIFIED: Support loading from checkpoint files (which contain model_state_dict and model_config)
         if device == 'auto':
             device = 'cuda' if torch.cuda.is_available() else 'cpu'
         
         checkpoint = safe_load(path, map_location=device)
+        
+        # If the file is a checkpoint (saved by trainer with model_state_dict and model_config)
+        if 'model_state_dict' in checkpoint and 'model_config' in checkpoint:
+            config = checkpoint['model_config']
+            agent = cls(
+                network_type=config['network_type'],
+                observation_size=config.get('observation_size', OBSERVATION_SIZE),
+                action_size=config.get('action_size', ACTION_SIZE),
+                hidden_size=config['hidden_size'],
+                use_auxiliary=config.get('use_auxiliary', False),
+                device=device
+            )
+            agent.network.load_state_dict(checkpoint['model_state_dict'], strict=False)
+            print(f"Loaded agent from checkpoint {path} (strict=False)")
+            return agent
+        
+        # Otherwise assume it's a standard agent file
         config = checkpoint['config']   # will crash if missing
         
         # Support both flat and nested (older) config structures

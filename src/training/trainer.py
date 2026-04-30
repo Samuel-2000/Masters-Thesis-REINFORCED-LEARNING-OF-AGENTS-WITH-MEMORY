@@ -25,6 +25,188 @@ import cv2
 from src.core.constants import (
     OBSERVATION_SIZE, ACTION_SIZE
 )
+
+# ============================================================================
+# STANDALONE PLOTTING FUNCTION (ADDED)
+# ============================================================================
+def generate_plots_from_metrics(metrics: Dict[str, Any], experiment_name: str, output_dir: str = "results/plots"):
+    """Generate all training plots from a metrics dictionary (no training required)."""
+    import matplotlib.pyplot as plt
+    from pathlib import Path
+
+    plots_dir = Path(output_dir) / experiment_name
+    plots_dir.mkdir(parents=True, exist_ok=True)
+
+    def save_plot(fig, name):
+        path = plots_dir / f"{name}.png"
+        fig.savefig(str(path), dpi=150, bbox_inches='tight')
+        plt.close(fig)
+
+    # ---- 1. Training Rewards (raw) + Test Rewards ----
+    fig, ax = plt.subplots(figsize=(8, 5))
+    rewards = np.array(metrics['train_rewards'])
+    epochs = np.arange(len(rewards))
+    ax.plot(epochs, rewards, 'b-', alpha=0.7, linewidth=1, label='Train Reward (raw)')
+    if 'test_rewards' in metrics and len(metrics['test_rewards']) > 0:
+        test_rewards = metrics['test_rewards']
+        test_interval = max(1, len(rewards) // len(test_rewards))
+        x_vals = np.arange(0, len(test_rewards) * test_interval, test_interval)
+        ax.plot(x_vals, test_rewards, 'g-o', linewidth=1.5, markersize=6, label='Test Reward')
+    ax.set_title('Training & Test Rewards (raw)')
+    ax.set_xlabel('Epoch')
+    ax.set_ylabel('Reward')
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+    save_plot(fig, 'rewards')
+
+    # ---- 2. Training Losses (total + policy) ----
+    fig, ax = plt.subplots(figsize=(8, 5))
+    ax.plot(metrics['train_losses'], 'r-', alpha=0.7, label='Total Loss')
+    if 'policy_losses' in metrics and len(metrics['policy_losses']) > 0:
+        ax.plot(metrics['policy_losses'], 'r--', alpha=0.5, label='Policy Loss')
+    ax.set_title('Training Losses')
+    ax.set_xlabel('Epoch')
+    ax.set_ylabel('Loss')
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    save_plot(fig, 'losses')
+
+    # ---- 3. Auxiliary Losses (if any) ----
+    if 'aux_losses' in metrics and len(metrics['aux_losses']) > 0:
+        fig, ax = plt.subplots(figsize=(8, 5))
+        ax.plot(metrics['aux_losses'], label='Total Aux Loss', color='purple')
+        if 'energy_losses' in metrics and len(metrics['energy_losses']) > 0:
+            ax.plot(metrics['energy_losses'], label='Energy MSE', color='orange')
+        if 'obs_losses' in metrics and len(metrics['obs_losses']) > 0:
+            ax.plot(metrics['obs_losses'], label='Obs MSE', color='green')
+        ax.set_title('Auxiliary Losses')
+        ax.set_xlabel('Epoch')
+        ax.set_ylabel('Loss')
+        ax.set_yscale('log')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        save_plot(fig, 'aux_losses')
+
+    # ---- 4. Complexity & Task Class Progression (raw) ----
+    if 'complexity_history' in metrics and len(metrics['complexity_history']) > 0:
+        fig, ax = plt.subplots(figsize=(8, 5))
+        ax.plot(metrics['complexity_history'], 'b-', linewidth=1, label='Complexity')
+        ax.set_xlabel('Epoch')
+        ax.set_ylabel('Complexity Level', color='b')
+        ax.tick_params(axis='y', labelcolor='b')
+        ax.set_ylim(0, 1.1)
+        ax.grid(True, alpha=0.3)
+        if 'task_class_history' in metrics and len(metrics['task_class_history']) > 0:
+            ax2 = ax.twinx()
+            stage_map = {'basic': 0.0, 'doors': 0.33, 'buttons': 0.66, 'complex': 1.0}
+            task_numeric = []
+            for t in metrics['task_class_history']:
+                if isinstance(t, str):
+                    task_numeric.append(stage_map.get(t, 0.0))
+                else:
+                    task_numeric.append(float(t))
+            ax2.plot(task_numeric, 'g--', linewidth=1.5, label='Task Class', alpha=0.9)
+            ax2.set_ylabel('Task Class', color='g')
+            ax2.tick_params(axis='y', labelcolor='g')
+            ax2.set_yticks([0.0, 0.33, 0.66, 1.0])
+            ax2.set_yticklabels(['Basic', 'Doors', 'Buttons', 'Complex'])
+            ax2.set_ylim(-0.1, 1.1)
+            lines1, labels1 = ax.get_legend_handles_labels()
+            lines2, labels2 = ax2.get_legend_handles_labels()
+            ax2.legend(lines1 + lines2, labels1 + labels2, loc='upper left')
+        else:
+            ax.legend()
+        ax.set_title('Complexity Progression (raw)')
+        save_plot(fig, 'complexity')
+
+    # ---- 5. Performance Scores (colored by config change) ----
+    if 'performance_scores' in metrics and len(metrics['performance_scores']) > 0 and 'complexity_history' in metrics:
+        fig, ax = plt.subplots(figsize=(8, 5))
+        scores = np.array(metrics['performance_scores'])
+        window = max(1, len(metrics['train_rewards']) // len(scores))
+        perf_epochs = np.arange(len(scores)) * window
+        complexities = np.array(metrics['complexity_history'])
+        tasks = metrics.get('task_class_history', ['basic'] * len(complexities))
+        # Convert to numpy array if it's a list to allow indexing
+        if isinstance(tasks, list):
+            tasks = np.array(tasks)
+        complexities_at_perf = complexities[perf_epochs[:len(scores)]]
+        tasks_at_perf = tasks[perf_epochs[:len(scores)]]
+        change_indices = []
+        for i in range(1, len(complexities_at_perf)):
+            if abs(complexities_at_perf[i] - complexities_at_perf[i-1]) > 1e-6 or tasks_at_perf[i] != tasks_at_perf[i-1]:
+                change_indices.append(i)
+        colors = ['orange', 'blue']
+        start = 0
+        for idx, split in enumerate(change_indices):
+            seg_x = perf_epochs[start:split]
+            seg_y = scores[start:split]
+            if len(seg_x) > 0:
+                ax.plot(seg_x, seg_y, color=colors[idx % 2], linewidth=1.5)
+                ax.axvline(x=perf_epochs[split], color='gray', linestyle=':', alpha=0.5)
+            start = split
+        if start < len(perf_epochs):
+            ax.plot(perf_epochs[start:], scores[start:], color=colors[len(change_indices) % 2], linewidth=1.5)
+        ax.set_title('Performance Scores (colored by config change)')
+        ax.set_xlabel('Epoch')
+        ax.set_ylabel('Score')
+        ax.set_ylim(0, 1.1)
+        ax.grid(True, alpha=0.3)
+        save_plot(fig, 'performance_scores')
+
+    # ---- 6. Complexity vs Reward (raw) ----
+    if 'complexity_history' in metrics and len(metrics['train_rewards']) > 10:
+        fig, ax = plt.subplots(figsize=(8, 5))
+        complexities = np.array(metrics['complexity_history'])
+        rewards_raw = np.array(metrics['train_rewards'])
+        sc = ax.scatter(complexities, rewards_raw, c=range(len(complexities)), cmap='viridis', alpha=0.7, s=10)
+        plt.colorbar(sc, ax=ax, label='Epoch')
+        if len(complexities) > 1 and len(rewards_raw) > 1:
+            corr = np.corrcoef(complexities, rewards_raw)[0, 1]
+            ax.set_title(f'Complexity vs Reward (raw, corr: {corr:.3f})')
+        else:
+            ax.set_title('Complexity vs Reward (raw)')
+        ax.set_xlabel('Complexity Level')
+        ax.set_ylabel('Reward')
+        ax.grid(True, alpha=0.3)
+        save_plot(fig, 'complexity_vs_reward')
+
+    # ---- 7. Reward vs Complexity per stage ----
+    if 'task_class_history' in metrics and len(metrics['task_class_history']) > 0:
+        stage_order = ['basic', 'doors', 'buttons', 'complex']
+        unique_stages = [s for s in stage_order if s in metrics['task_class_history']]
+        rewards_raw = np.array(metrics['train_rewards'])
+        complexities_raw = np.array(metrics['complexity_history'])
+        stages_raw = np.array(metrics['task_class_history'])
+        for stage in unique_stages:
+            fig, ax = plt.subplots(figsize=(8, 5))
+            mask = (stages_raw == stage)
+            ax.scatter(complexities_raw, rewards_raw, c='gray', alpha=0.2, s=10, label='All epochs')
+            epochs_of_stage = np.arange(len(rewards_raw))[mask]
+            sc = ax.scatter(complexities_raw[mask], rewards_raw[mask], c=epochs_of_stage, cmap='viridis', alpha=0.8, s=30, label=f'{stage.capitalize()} active')
+            cbar = plt.colorbar(sc, ax=ax)
+            cbar.set_label('Epoch')
+            if np.sum(mask) > 1:
+                x_vals = complexities_raw[mask]
+                y_vals = rewards_raw[mask]
+                valid = ~(np.isnan(x_vals) | np.isnan(y_vals) | np.isinf(x_vals) | np.isinf(y_vals))
+                x_vals = x_vals[valid]
+                y_vals = y_vals[valid]
+                if len(x_vals) >= 2 and np.std(x_vals) > 1e-6:
+                    try:
+                        z = np.polyfit(x_vals, y_vals, 1)
+                        p = np.poly1d(z)
+                        x_line = np.linspace(x_vals.min(), x_vals.max(), 50)
+                        ax.plot(x_line, p(x_line), 'r--', linewidth=2, label=f'Trend: {z[0]:.2f}*x + {z[1]:.2f}')
+                    except np.linalg.LinAlgError:
+                        pass
+            ax.set_title(f'Reward vs Complexity – {stage.capitalize()} stage (raw data)')
+            ax.set_xlabel('Complexity Level')
+            ax.set_ylabel('Reward')
+            ax.grid(True, alpha=0.3)
+            ax.legend()
+            save_plot(fig, f'reward_vs_complexity_stage_{stage}')
+
 # ============================================================================
 # DYNAMIC COMPLEXITY MANAGER
 # ============================================================================
@@ -328,7 +510,6 @@ class ComplexityManager:
             "total_switches": self.total_switches
         }
 
-
 # ============================================================================
 # BASE TRAINER (NO DYNAMIC COMPLEXITY)
 # ============================================================================
@@ -414,15 +595,18 @@ class ParallelTrainer:
             }
         }
 
-
-
+        # Resume from checkpoint if provided (ADDED)
+        resume_path = config['experiment'].get('resume')
+        if resume_path and Path(resume_path).exists():
+            self._load_checkpoint(resume_path)
 
     def _create_vectorized_env(self) -> VectorizedMazeEnv:
         """Create vectorized training environment from config (fixed)"""
         env_config = self.config['environment'].copy()
         return VectorizedMazeEnv(
             num_envs=self.batch_size,
-            env_config=env_config
+            env_config=env_config,
+            base_seed=self.base_seed
         )
     
     def _create_agent(self) -> Agent:
@@ -557,6 +741,7 @@ class ParallelTrainer:
             'energy_targets': torch.stack(all_energies, dim=1),   # [B,T]
             'next_obs_targets': torch.cat(all_next_obs, dim=1),   # [B,T,K]
         }
+    
     def _compute_loss(self, 
                      experiences: Dict[str, torch.Tensor]) -> Tuple[torch.Tensor, Dict]:
         """Compute policy loss with auxiliary losses"""
@@ -705,28 +890,81 @@ class ParallelTrainer:
         }
     
 
+    def _load_checkpoint(self, checkpoint_path: str):
+        """Load training state from a checkpoint file."""
+        checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
+        # Restore metrics
+        self.metrics = checkpoint['metrics']
+        # Restore optimizer
+        self.optimizer.load_state_dict(checkpoint['optimizer_state'])
+        # Restore scheduler
+        self.lr_scheduler.load_state_dict(checkpoint['scheduler_state'])
+        # If model state dict is present, load it (optional, usually we load from separate model file)
+        if 'model_state_dict' in checkpoint:
+            self.agent.network.load_state_dict(checkpoint['model_state_dict'], strict=False)
+            print(f"Loaded model weights from checkpoint {checkpoint_path}")
+        # Restore complexity manager if present (for adaptive trainer)
+        if hasattr(self, 'complexity_manager') and 'complexity_manager_state' in checkpoint:
+            cm_state = checkpoint['complexity_manager_state']
+            self.complexity_manager.current_stage_idx = cm_state['current_stage_idx']
+            self.complexity_manager.performance_history = deque(cm_state['performance_history'],
+                                                                maxlen=self.complexity_manager.performance_window)
+            self.complexity_manager.adjustments_made = cm_state['adjustments_made']
+            if 'stage_complexities' in cm_state:
+                self.complexity_manager.stage_complexities = cm_state['stage_complexities']
+            if 'max_rewards_by_stage' in cm_state:
+                self.complexity_manager.max_rewards_by_stage = cm_state['max_rewards_by_stage']
+            if 'epochs_without_progress' in cm_state:
+                self.complexity_manager.epochs_without_progress = cm_state['epochs_without_progress']
+            if 'last_complexity_increase_epoch' in cm_state:
+                self.complexity_manager.last_complexity_increase_epoch = cm_state['last_complexity_increase_epoch']
+            if 'last_max_reward' in cm_state:
+                self.complexity_manager.last_max_reward = cm_state['last_max_reward']
+        start_epoch = len(self.metrics['train_rewards'])
+        self.logger.info(f"Resumed training from checkpoint at epoch {start_epoch}")
+
     def _save_model(self, name: str):
         save_dir = Path(self.config['experiment']['save_dir'])
         save_dir.mkdir(exist_ok=True)
 
-        # Save the agent model using agent.save()
+        # Save agent model (separate file)
         if name in ['best', 'final']:
             agent_path = save_dir / f"{self.experiment_name}_{name}.pt"
-            self.agent.save(str(agent_path))          # no extra_data needed for base trainer
+            self.agent.save(str(agent_path))
             self.logger.info(f"Saved agent to {agent_path}")
 
-        # Save checkpoint (optimizer, scheduler, metrics) for resuming
+        # Save checkpoint (with model weights and config for resume/testing)
         checkpoint_path = save_dir / f"{self.experiment_name}_{name}_checkpoint.pt"
         checkpoint = {
             'epoch': len(self.metrics['train_rewards']),
             'optimizer_state': self.optimizer.state_dict(),
             'scheduler_state': self.lr_scheduler.state_dict(),
             'metrics': self.metrics,
+            # Include model state and config for direct loading
+            'model_state_dict': self.agent.network.state_dict(),
+            'model_config': {
+                'network_type': self.agent.network_type,
+                'use_auxiliary': self.agent.use_auxiliary,
+                'hidden_size': self.agent.network.hidden_size,
+                'observation_size': OBSERVATION_SIZE,
+                'action_size': ACTION_SIZE
+            },
             'config': self.config
         }
+        if hasattr(self, 'complexity_manager'):
+            checkpoint['complexity_manager_state'] = {
+                'current_stage_idx': self.complexity_manager.current_stage_idx,
+                'performance_history': list(self.complexity_manager.performance_history),
+                'adjustments_made': self.complexity_manager.adjustments_made,
+                'stage_complexities': self.complexity_manager.stage_complexities,
+                'max_rewards_by_stage': self.complexity_manager.max_rewards_by_stage,
+                'epochs_without_progress': self.complexity_manager.epochs_without_progress,
+                'last_complexity_increase_epoch': self.complexity_manager.last_complexity_increase_epoch,
+                'last_max_reward': self.complexity_manager.last_max_reward,
+            }
         torch.save(checkpoint, str(checkpoint_path))
         self.logger.info(f"Saved checkpoint to {checkpoint_path}")
-    
+
     def _save_metrics(self):
         """Save training metrics"""
         metrics_dir = Path('logs/metrics')
@@ -744,216 +982,8 @@ class ParallelTrainer:
         # Plot metrics
         self._plot_metrics()
 
-
     def _plot_metrics(self):
-        """Save each plot as a separate file in a folder named after the experiment.
-        All data are shown raw (no smoothing).
-        """
-        import matplotlib.pyplot as plt
-
-        # Create directory for this experiment's plots
-        plots_dir = Path('results/plots') / self.experiment_name
-        plots_dir.mkdir(parents=True, exist_ok=True)
-
-        def save_plot(fig, name):
-            path = plots_dir / f"{name}.png"
-            fig.savefig(str(path), dpi=150, bbox_inches='tight')
-            plt.close(fig)
-            self.logger.info(f"Saved plot to {path}")
-
-        # ---- 1. Training Rewards (raw) + Test Rewards ----
-        fig, ax = plt.subplots(figsize=(8, 5))
-        rewards = np.array(self.metrics['train_rewards'])
-        epochs = np.arange(len(rewards))
-        ax.plot(epochs, rewards, 'b-', alpha=0.7, linewidth=1, label='Train Reward (raw)')
-        
-        # Test rewards (if available)
-        if 'test_rewards' in self.metrics and len(self.metrics['test_rewards']) > 0:
-            test_rewards = self.metrics['test_rewards']
-            test_interval = self.config['training']['test_interval']
-            x_vals = np.arange(0, len(test_rewards) * test_interval, test_interval)
-            ax.plot(x_vals, test_rewards, 'g-o', linewidth=1.5, markersize=6, label='Test Reward')
-        
-        ax.set_title('Training & Test Rewards (raw)')
-        ax.set_xlabel('Epoch')
-        ax.set_ylabel('Reward')
-        ax.grid(True, alpha=0.3)
-        ax.legend()
-        save_plot(fig, 'rewards')
-
-        # ---- 2. Training Losses (total + policy) ----
-        fig, ax = plt.subplots(figsize=(8, 5))
-        ax.plot(self.metrics['train_losses'], 'r-', alpha=0.7, label='Total Loss')
-        if 'policy_losses' in self.metrics and len(self.metrics['policy_losses']) > 0:
-            ax.plot(self.metrics['policy_losses'], 'r--', alpha=0.5, label='Policy Loss')
-        ax.set_title('Training Losses')
-        ax.set_xlabel('Epoch')
-        ax.set_ylabel('Loss')
-        ax.legend()
-        ax.grid(True, alpha=0.3)
-        save_plot(fig, 'losses')
-
-        # ---- 3. Auxiliary Losses (if any) ----
-        has_aux = 'aux_losses' in self.metrics and len(self.metrics['aux_losses']) > 0
-        if has_aux:
-            fig, ax = plt.subplots(figsize=(8, 5))
-            ax.plot(self.metrics['aux_losses'], label='Total Aux Loss', color='purple')
-            if 'energy_losses' in self.metrics and len(self.metrics['energy_losses']) > 0:
-                ax.plot(self.metrics['energy_losses'], label='Energy MSE', color='orange')
-            if 'obs_losses' in self.metrics and len(self.metrics['obs_losses']) > 0:
-                ax.plot(self.metrics['obs_losses'], label='Obs MSE', color='green')
-            ax.set_title('Auxiliary Losses')
-            ax.set_xlabel('Epoch')
-            ax.set_ylabel('Loss')
-            ax.set_yscale('log')
-            ax.legend()
-            ax.grid(True, alpha=0.3)
-            save_plot(fig, 'aux_losses')
-
-        # ---- 4. Complexity & Task Class Progression (raw) ----
-        has_complexity = 'complexity_history' in self.metrics and len(self.metrics['complexity_history']) > 0
-        if has_complexity:
-            fig, ax = plt.subplots(figsize=(8, 5))
-            ax.plot(self.metrics['complexity_history'], 'b-', linewidth=1, label='Complexity')
-            ax.set_xlabel('Epoch')
-            ax.set_ylabel('Complexity Level', color='b')
-            ax.tick_params(axis='y', labelcolor='b')
-            ax.set_ylim(0, 1.1)
-            ax.grid(True, alpha=0.3)
-            # Task class overlay if available
-            if 'task_class_history' in self.metrics and len(self.metrics['task_class_history']) > 0:
-                ax2 = ax.twinx()
-                stage_map = {'basic': 0.0, 'doors': 0.33, 'buttons': 0.66, 'complex': 1.0}
-                task_numeric = [stage_map.get(s, 0.0) for s in self.metrics['task_class_history']]
-                ax2.plot(task_numeric, 'g--', linewidth=1.5, label='Task Class', alpha=0.9)
-                ax2.set_ylabel('Task Class', color='g')
-                ax2.tick_params(axis='y', labelcolor='g')
-                ax2.set_yticks([0.0, 0.33, 0.66, 1.0])
-                ax2.set_yticklabels(['Basic', 'Doors', 'Buttons', 'Complex'])
-                ax2.set_ylim(-0.1, 1.1)
-                lines1, labels1 = ax.get_legend_handles_labels()
-                lines2, labels2 = ax2.get_legend_handles_labels()
-                ax2.legend(lines1 + lines2, labels1 + labels2, loc='upper left')
-            else:
-                ax.legend()
-            ax.set_title('Complexity Progression (raw)')
-            save_plot(fig, 'complexity')
-
-        # ---- 5. Performance Scores (colored by config change) ----
-        has_perf_scores = 'performance_scores' in self.metrics and len(self.metrics['performance_scores']) > 0
-        if has_perf_scores:
-            fig, ax = plt.subplots(figsize=(8, 5))
-            scores = np.array(self.metrics['performance_scores'])
-            window = self.complexity_manager.performance_window
-            # Each performance score corresponds to an epoch that is a multiple of window
-            perf_epochs = np.arange(len(scores)) * window
-            # Get raw complexity and task at those exact epochs
-            full_complexities = np.array(self.metrics['complexity_history'])
-            full_tasks = np.array(self.metrics['task_class_history'])
-            complexities_at_perf = full_complexities[perf_epochs]
-            tasks_at_perf = full_tasks[perf_epochs]
-            
-            # Detect change points where complexity or task changed
-            change_indices = []
-            for i in range(1, len(complexities_at_perf)):
-                if abs(complexities_at_perf[i] - complexities_at_perf[i-1]) > 1e-6 or tasks_at_perf[i] != tasks_at_perf[i-1]:
-                    change_indices.append(i)
-            
-            colors = ['orange', 'blue']
-            start = 0
-            for idx, split in enumerate(change_indices):
-                seg_x = perf_epochs[start:split]
-                seg_y = scores[start:split]
-                if len(seg_x) > 0:
-                    ax.plot(seg_x, seg_y, color=colors[idx % 2], linewidth=1.5)
-                    ax.axvline(x=perf_epochs[split], color='gray', linestyle=':', alpha=0.5)
-                start = split
-            if start < len(perf_epochs):
-                ax.plot(perf_epochs[start:], scores[start:], 
-                        color=colors[len(change_indices) % 2], linewidth=1.5)
-            
-            if hasattr(self, 'complexity_manager') and self.complexity_manager is not None:
-                inc = self.complexity_manager.increase_threshold
-                dec = self.complexity_manager.decrease_threshold
-                ax.axhline(inc, color='green', linestyle='--', alpha=0.7, label='Increase')
-                ax.axhline(dec, color='red', linestyle='--', alpha=0.7, label='Decrease')
-            
-            ax.set_title('Performance Scores (colored by config change)')
-            ax.set_xlabel('Epoch')
-            ax.set_ylabel('Score')
-            ax.set_ylim(0, 1.1)
-            ax.grid(True, alpha=0.3)
-            ax.legend(fontsize=9)
-            save_plot(fig, 'performance_scores')
-
-        # ---- 6. Complexity vs Reward (raw complexity, raw reward) ----
-        if has_complexity and len(self.metrics['train_rewards']) > 10:
-            fig, ax = plt.subplots(figsize=(8, 5))
-            complexities = np.array(self.metrics['complexity_history'])
-            rewards_raw = np.array(self.metrics['train_rewards'])
-            # Use raw values directly
-            sc = ax.scatter(complexities, rewards_raw, c=range(len(complexities)), 
-                            cmap='viridis', alpha=0.7, s=10)
-            plt.colorbar(sc, ax=ax, label='Epoch')
-            if len(complexities) > 1 and len(rewards_raw) > 1:
-                correlation = np.corrcoef(complexities, rewards_raw)[0, 1]
-                ax.set_title(f'Complexity vs Reward (raw, corr: {correlation:.3f})')
-            else:
-                ax.set_title('Complexity vs Reward (raw)')
-            ax.set_xlabel('Complexity Level')
-            ax.set_ylabel('Reward')
-            ax.grid(True, alpha=0.3)
-            save_plot(fig, 'complexity_vs_reward')
-
-        # ---- 7. Reward vs Complexity per stage (raw data) ----
-        has_stage_highlight = ('task_class_history' in self.metrics and 
-                            len(self.metrics['task_class_history']) > 0)
-        if has_stage_highlight:
-            stage_order = ['basic', 'doors', 'buttons', 'complex']
-            unique_stages = [s for s in stage_order if s in self.metrics['task_class_history']]
-            
-            # Extract raw data
-            rewards_raw = np.array(self.metrics['train_rewards'])
-            complexities_raw = np.array(self.metrics['complexity_history'])
-            stages_raw = np.array(self.metrics['task_class_history'])
-            
-            for stage in unique_stages:
-                fig, ax = plt.subplots(figsize=(8, 5))
-                mask = (stages_raw == stage)
-                # Scatter all points as faint background
-                ax.scatter(complexities_raw, rewards_raw, c='gray', alpha=0.2, s=10, label='All epochs')
-                # Highlight this stage's points with color mapped to epoch
-                epochs_of_stage = np.arange(len(rewards_raw))[mask]
-                sc = ax.scatter(complexities_raw[mask], rewards_raw[mask],
-                                c=epochs_of_stage, cmap='viridis',
-                                alpha=0.8, s=30, label=f'{stage.capitalize()} active')
-                cbar = plt.colorbar(sc, ax=ax)
-                cbar.set_label('Epoch')
-                
-                # Optional trend line
-                if np.sum(mask) > 1:
-                    x_vals = complexities_raw[mask]
-                    y_vals = rewards_raw[mask]
-                    valid = ~(np.isnan(x_vals) | np.isnan(y_vals) | 
-                            np.isinf(x_vals) | np.isinf(y_vals))
-                    x_vals = x_vals[valid]
-                    y_vals = y_vals[valid]
-                    if len(x_vals) >= 2 and np.std(x_vals) > 1e-6:
-                        try:
-                            z = np.polyfit(x_vals, y_vals, 1)
-                            p = np.poly1d(z)
-                            x_line = np.linspace(x_vals.min(), x_vals.max(), 50)
-                            ax.plot(x_line, p(x_line), 'r--', linewidth=2,
-                                    label=f'Trend: {z[0]:.2f}*x + {z[1]:.2f}')
-                        except (np.linalg.LinAlgError, ValueError):
-                            pass
-                ax.set_title(f'Reward vs Complexity – {stage.capitalize()} stage (raw data)')
-                ax.set_xlabel('Complexity Level')
-                ax.set_ylabel('Reward')
-                ax.grid(True, alpha=0.3)
-                ax.legend()
-                save_plot(fig, f'reward_vs_complexity_stage_{stage}')
-
+        generate_plots_from_metrics(self.metrics, self.experiment_name)
 
     def _print_training_summary(self, start_time: float):
         """Print training summary"""
@@ -978,7 +1008,8 @@ class ParallelTrainer:
         save_interval = training_config['save_interval']
         test_interval = training_config['test_interval']
         
-        pbar = tqdm(range(epochs), desc="Training", unit="epoch")
+        start_epoch = len(self.metrics['train_rewards'])  # for resume
+        pbar = tqdm(range(start_epoch, epochs), desc="Training", unit="epoch", initial=start_epoch, total=epochs)
         start_time = time.time()
         
         for epoch in pbar:
@@ -1167,11 +1198,23 @@ class AdaptiveParallelTrainer(ParallelTrainer):
             'optimizer_state': self.optimizer.state_dict(),
             'scheduler_state': self.lr_scheduler.state_dict(),
             'metrics': self.metrics,
+            'model_state_dict': self.agent.network.state_dict(),
+            'model_config': {
+                'network_type': self.agent.network_type,
+                'use_auxiliary': self.agent.use_auxiliary,
+                'hidden_size': self.agent.network.hidden_size,
+                'observation_size': OBSERVATION_SIZE,
+                'action_size': ACTION_SIZE
+            },
             'complexity_manager_state': {
                 'current_stage_idx': self.complexity_manager.current_stage_idx,
-                'current_complexity': self.complexity_manager.get_current_complexity(),
                 'performance_history': list(self.complexity_manager.performance_history),
-                'adjustments_made': self.complexity_manager.adjustments_made
+                'adjustments_made': self.complexity_manager.adjustments_made,
+                'stage_complexities': self.complexity_manager.stage_complexities,
+                'max_rewards_by_stage': self.complexity_manager.max_rewards_by_stage,
+                'epochs_without_progress': self.complexity_manager.epochs_without_progress,
+                'last_complexity_increase_epoch': self.complexity_manager.last_complexity_increase_epoch,
+                'last_max_reward': self.complexity_manager.last_max_reward,
             },
             'config': self.config
         }
@@ -1255,7 +1298,8 @@ class AdaptiveParallelTrainer(ParallelTrainer):
         cv2.imshow('Training Controls', dummy)
         cv2.waitKey(1)
         
-        pbar = tqdm(range(epochs), desc="Training", unit="epoch")
+        start_epoch = len(self.metrics['train_rewards'])
+        pbar = tqdm(range(start_epoch, epochs), desc="Training", unit="epoch", initial=start_epoch, total=epochs)
         start_time = time.time()
         
         for epoch in pbar:

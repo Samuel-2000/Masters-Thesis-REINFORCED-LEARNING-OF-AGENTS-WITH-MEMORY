@@ -20,11 +20,18 @@ def parse_args():
 
             # dynamic complexity test across stages and complexities
             python run.py test --model models/lstm_best.pt --episodes 5 --dynamic-complexity [--stages basic doors buttons --complexities 0.0 0.5 1.0]
-                
 
             # Human play mode
             python run.py test --play --episodes 4 --task-class complex --complexity-level 0.5
             python run.py test --play --episodes 1 --dynamic-complexity [--stages basic doors buttons --complexities 0.0 0.5 1.0]
+
+            # Plot saved metrics
+            python run.py plot --experiment-name lstm_64b_0.0005lr_2026-04-28_11-35-00
+
+            # Resume training
+            python run.py train --network-type lstm --epochs 10000 --batch-size 64 --lr 0.0005 --resume models/lstm_16b_0.0005lr_2026-04-28_11-35-00_best_checkpoint.pt
+
+
         """
     )
     subparsers = parser.add_subparsers(dest="command", required=True, help="Command to run")
@@ -43,6 +50,8 @@ def parse_args():
 
     train_parser.add_argument("--save-dir", type=str, default="models", help="Directory to save models")
     train_parser.add_argument("--experiment-name", type=str, default=None, help="Override experiment name")
+    train_parser.add_argument("--resume", type=str, default=None, help="Path to checkpoint file (.pt) to resume training")
+
 
     # Dynamic complexity parameters (required only if --dynamic-complexity is set)
     train_parser.add_argument("--performance-window", type=int, default=None)
@@ -86,6 +95,9 @@ def parse_args():
         general_parser.add_argument("--seed", type=int, default=42, help="Random seed")
 
 
+    plot_parser = subparsers.add_parser("plot", help="Plot training metrics from saved data")
+    plot_parser.add_argument("--experiment-name", type=str, required=True, help="Name of the experiment (matches folder in logs/metrics)")
+    plot_parser.add_argument("--output-dir", type=str, default="results/plots", help="Directory to save generated plots")
 
 
     """
@@ -132,14 +144,16 @@ def parse_args():
 
     required_env = []
 
-    if bool(args.dynamic_complexity) == bool(args.task_class):
-        raise "either use dynamic_complexity or choose task_class"
-    
-    if bool(args.dynamic_complexity) == (args.complexity_level is not None):
-        raise "either use dynamic_complexity or choose complexity_level"
-    
-    if bool(args.dynamic_complexity) and bool(any([args.n_doors, args.n_buttons_per_door, args.button_break_probability])):
-        raise "either use dynamic_complexity or choose door and button parameters"
+    if not args.resume:
+
+        if bool(args.dynamic_complexity) == bool(args.task_class):
+            raise "either use dynamic_complexity or choose task_class"
+        
+        if bool(args.dynamic_complexity) == (args.complexity_level is not None):
+            raise "either use dynamic_complexity or choose complexity_level"
+        
+        if bool(args.dynamic_complexity) and bool(any([args.n_doors, args.n_buttons_per_door, args.button_break_probability])):
+            raise "either use dynamic_complexity or choose door and button parameters"
 
 
     elif args.command == "test":
