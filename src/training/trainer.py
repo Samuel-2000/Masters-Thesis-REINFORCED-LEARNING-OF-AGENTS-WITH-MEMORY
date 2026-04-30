@@ -27,14 +27,12 @@ from src.core.constants import (
 )
 
 # ============================================================================
-# STANDALONE PLOTTING FUNCTION (ADDED)
+# STANDALONE PLOTTING FUNCTION (with safe array length)
 # ============================================================================
-def generate_plots_from_metrics(metrics: Dict[str, Any], experiment_name: str, output_dir: str = "results/plots"):
-    """Generate all training plots from a metrics dictionary (no training required)."""
+def generate_plots_from_metrics(metrics: Dict[str, Any], plots_dir: Path):
+    """Generate all training plots from a metrics dictionary."""
     import matplotlib.pyplot as plt
-    from pathlib import Path
 
-    plots_dir = Path(output_dir) / experiment_name
     plots_dir.mkdir(parents=True, exist_ok=True)
 
     def save_plot(fig, name):
@@ -71,7 +69,7 @@ def generate_plots_from_metrics(metrics: Dict[str, Any], experiment_name: str, o
     ax.grid(True, alpha=0.3)
     save_plot(fig, 'losses')
 
-    # ---- 3. Auxiliary Losses (if any) ----
+    # ---- 3. Auxiliary Losses ----
     if 'aux_losses' in metrics and len(metrics['aux_losses']) > 0:
         fig, ax = plt.subplots(figsize=(8, 5))
         ax.plot(metrics['aux_losses'], label='Total Aux Loss', color='purple')
@@ -87,7 +85,7 @@ def generate_plots_from_metrics(metrics: Dict[str, Any], experiment_name: str, o
         ax.grid(True, alpha=0.3)
         save_plot(fig, 'aux_losses')
 
-    # ---- 4. Complexity & Task Class Progression (raw) ----
+    # ---- 4. Complexity & Task Class Progression ----
     if 'complexity_history' in metrics and len(metrics['complexity_history']) > 0:
         fig, ax = plt.subplots(figsize=(8, 5))
         ax.plot(metrics['complexity_history'], 'b-', linewidth=1, label='Complexity')
@@ -126,42 +124,56 @@ def generate_plots_from_metrics(metrics: Dict[str, Any], experiment_name: str, o
         window = max(1, len(metrics['train_rewards']) // len(scores))
         perf_epochs = np.arange(len(scores)) * window
         complexities = np.array(metrics['complexity_history'])
-        tasks = metrics.get('task_class_history', ['basic'] * len(complexities))
-        # Convert to numpy array if it's a list to allow indexing
-        if isinstance(tasks, list):
-            tasks = np.array(tasks)
-        complexities_at_perf = complexities[perf_epochs[:len(scores)]]
-        tasks_at_perf = tasks[perf_epochs[:len(scores)]]
-        change_indices = []
-        for i in range(1, len(complexities_at_perf)):
-            if abs(complexities_at_perf[i] - complexities_at_perf[i-1]) > 1e-6 or tasks_at_perf[i] != tasks_at_perf[i-1]:
-                change_indices.append(i)
-        colors = ['orange', 'blue']
-        start = 0
-        for idx, split in enumerate(change_indices):
-            seg_x = perf_epochs[start:split]
-            seg_y = scores[start:split]
-            if len(seg_x) > 0:
-                ax.plot(seg_x, seg_y, color=colors[idx % 2], linewidth=1.5)
-                ax.axvline(x=perf_epochs[split], color='gray', linestyle=':', alpha=0.5)
-            start = split
-        if start < len(perf_epochs):
-            ax.plot(perf_epochs[start:], scores[start:], color=colors[len(change_indices) % 2], linewidth=1.5)
-        ax.set_title('Performance Scores (colored by config change)')
-        ax.set_xlabel('Epoch')
-        ax.set_ylabel('Score')
-        ax.set_ylim(0, 1.1)
-        ax.grid(True, alpha=0.3)
-        save_plot(fig, 'performance_scores')
+        # Ensure indices are within bounds
+        valid_mask = perf_epochs < len(complexities)
+        perf_epochs = perf_epochs[valid_mask]
+        scores = scores[:len(perf_epochs)]
+        if len(scores) > 0:
+            tasks = metrics.get('task_class_history', ['basic'] * len(complexities))
+            if isinstance(tasks, list):
+                tasks = np.array(tasks)
+            complexities_at_perf = complexities[perf_epochs]
+            tasks_at_perf = tasks[perf_epochs]
+            change_indices = []
+            for i in range(1, len(complexities_at_perf)):
+                if abs(complexities_at_perf[i] - complexities_at_perf[i-1]) > 1e-6 or tasks_at_perf[i] != tasks_at_perf[i-1]:
+                    change_indices.append(i)
+            colors = ['orange', 'blue']
+            start = 0
+            for idx, split in enumerate(change_indices):
+                seg_x = perf_epochs[start:split]
+                seg_y = scores[start:split]
+                if len(seg_x) > 0:
+                    ax.plot(seg_x, seg_y, color=colors[idx % 2], linewidth=1.5)
+                    ax.axvline(x=perf_epochs[split], color='gray', linestyle=':', alpha=0.5)
+                start = split
+            if start < len(perf_epochs):
+                ax.plot(perf_epochs[start:], scores[start:], color=colors[len(change_indices) % 2], linewidth=1.5)
+            # Threshold lines
+            inc_threshold = metrics.get('increase_threshold', 0.6)
+            dec_threshold = metrics.get('decrease_threshold', 0.4)
+            ax.axhline(inc_threshold, color='green', linestyle='--', alpha=0.7, label=f'Increase ({inc_threshold})')
+            ax.axhline(dec_threshold, color='red', linestyle='--', alpha=0.7, label=f'Decrease ({dec_threshold})')
+            ax.legend()
+            ax.set_title('Performance Scores (colored by config change)')
+            ax.set_xlabel('Epoch')
+            ax.set_ylabel('Score')
+            ax.set_ylim(0, 1.1)
+            ax.grid(True, alpha=0.3)
+            save_plot(fig, 'performance_scores')
 
     # ---- 6. Complexity vs Reward (raw) ----
     if 'complexity_history' in metrics and len(metrics['train_rewards']) > 10:
         fig, ax = plt.subplots(figsize=(8, 5))
         complexities = np.array(metrics['complexity_history'])
         rewards_raw = np.array(metrics['train_rewards'])
-        sc = ax.scatter(complexities, rewards_raw, c=range(len(complexities)), cmap='viridis', alpha=0.7, s=10)
+        # Ensure same length
+        min_len = min(len(complexities), len(rewards_raw))
+        complexities = complexities[:min_len]
+        rewards_raw = rewards_raw[:min_len]
+        sc = ax.scatter(complexities, rewards_raw, c=range(min_len), cmap='viridis', alpha=0.7, s=10)
         plt.colorbar(sc, ax=ax, label='Epoch')
-        if len(complexities) > 1 and len(rewards_raw) > 1:
+        if min_len > 1:
             corr = np.corrcoef(complexities, rewards_raw)[0, 1]
             ax.set_title(f'Complexity vs Reward (raw, corr: {corr:.3f})')
         else:
@@ -178,14 +190,19 @@ def generate_plots_from_metrics(metrics: Dict[str, Any], experiment_name: str, o
         rewards_raw = np.array(metrics['train_rewards'])
         complexities_raw = np.array(metrics['complexity_history'])
         stages_raw = np.array(metrics['task_class_history'])
+        min_len = min(len(rewards_raw), len(complexities_raw), len(stages_raw))
+        rewards_raw = rewards_raw[:min_len]
+        complexities_raw = complexities_raw[:min_len]
+        stages_raw = stages_raw[:min_len]
         for stage in unique_stages:
             fig, ax = plt.subplots(figsize=(8, 5))
             mask = (stages_raw == stage)
             ax.scatter(complexities_raw, rewards_raw, c='gray', alpha=0.2, s=10, label='All epochs')
-            epochs_of_stage = np.arange(len(rewards_raw))[mask]
-            sc = ax.scatter(complexities_raw[mask], rewards_raw[mask], c=epochs_of_stage, cmap='viridis', alpha=0.8, s=30, label=f'{stage.capitalize()} active')
-            cbar = plt.colorbar(sc, ax=ax)
-            cbar.set_label('Epoch')
+            epochs_of_stage = np.arange(min_len)[mask]
+            if len(epochs_of_stage) > 0:
+                sc = ax.scatter(complexities_raw[mask], rewards_raw[mask], c=epochs_of_stage, cmap='viridis', alpha=0.8, s=30, label=f'{stage.capitalize()} active')
+                cbar = plt.colorbar(sc, ax=ax)
+                cbar.set_label('Epoch')
             if np.sum(mask) > 1:
                 x_vals = complexities_raw[mask]
                 y_vals = rewards_raw[mask]
@@ -207,8 +224,9 @@ def generate_plots_from_metrics(metrics: Dict[str, Any], experiment_name: str, o
             ax.legend()
             save_plot(fig, f'reward_vs_complexity_stage_{stage}')
 
+
 # ============================================================================
-# DYNAMIC COMPLEXITY MANAGER
+# DYNAMIC COMPLEXITY MANAGER (unchanged)
 # ============================================================================
 class ComplexityManager:
     """Manages dynamic complexity adjustment based on agent performance"""
@@ -510,6 +528,7 @@ class ComplexityManager:
             "total_switches": self.total_switches
         }
 
+
 # ============================================================================
 # BASE TRAINER (NO DYNAMIC COMPLEXITY)
 # ============================================================================
@@ -520,21 +539,10 @@ class ParallelTrainer:
     def __init__(self, config: Dict[str, Any]):
         
         self.config = config
-        self.experiment_name = f"{config['model']['type']}_" \
-                                f"{config['training']['batch_size']}b_" \
-                                f"{config['training']['learning_rate']}lr_" \
-                                f"{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}"
-        
-        if config['training']['auxiliary_tasks']:
-            self.experiment_name += "_aux"
-
         self.base_seed = config['experiment']['seed']
         
-        # Setup
-        self.logger = setup_logging(self.experiment_name)
-        self.device = torch.device(
-            'cuda' if torch.cuda.is_available() else 'cpu'
-        )
+        # Set device
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         
         # Set seed
         seed_everything(config['experiment']['seed'])
@@ -543,8 +551,60 @@ class ParallelTrainer:
         training_config = self.config['training']
         self.batch_size = training_config['batch_size']
         
-        # Create initial vectorized environment (fixed, from config)
-        self.vector_env = self._create_vectorized_env()
+        # ---------- HANDLE RESUME BEFORE BUILDING EXPERIMENT NAME AND DIRECTORIES ----------
+        resume_path = config['experiment'].get('resume')
+        if resume_path and Path(resume_path).exists():
+            # Load checkpoint temporarily to extract experiment name and config
+            temp_checkpoint = torch.load(resume_path, map_location='cpu', weights_only=False)
+            if 'config' in temp_checkpoint:
+                orig_config = temp_checkpoint['config']
+                # Override current config with checkpoint's settings
+                config['environment'] = orig_config.get('environment', config['environment'])
+                config['model'] = orig_config.get('model', config['model'])
+                if 'training' in orig_config and 'dynamic_complexity' in orig_config['training']:
+                    config['training']['dynamic_complexity'] = orig_config['training']['dynamic_complexity']
+                # Use original base name and date subfolder
+                if 'experiment' in orig_config:
+                    self.base_name = orig_config['experiment'].get('base_name', None)
+                    self.date_subfolder = orig_config['experiment'].get('date_subfolder', None)
+                # If not found in config, fallback to parsing the path
+                if not self.base_name or not self.date_subfolder:
+                    parent = Path(resume_path).parent
+                    self.date_subfolder = parent.name
+                    self.base_name = parent.parent.name
+            else:
+                parent = Path(resume_path).parent
+                self.date_subfolder = parent.name
+                self.base_name = parent.parent.name
+        else:
+            # Build new base name (without timestamp) and date subfolder
+            self.base_name = config['experiment']['name'] or f"{config['model']['type']}_" \
+                              f"{config['training']['batch_size']}b_" \
+                              f"{config['training']['learning_rate']}lr"
+            if config['training']['auxiliary_tasks']:
+                self.base_name += "_aux"
+            self.date_subfolder = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+        
+        # Full experiment name for logging (for backward compatibility)
+        self.experiment_name = f"{self.base_name}_{self.date_subfolder}"
+        
+        # Now set up logging
+        self.logger = setup_logging(self.experiment_name)
+        
+        # Build structured directories: models/{network_type}/{aux_or_no_aux}/{base_name}/{date_subfolder}/
+        network_type = config['model']['type']
+        use_aux = config['model']['use_auxiliary']
+        aux_str = 'aux' if use_aux else 'no_aux'
+        
+        self.experiment_dir = Path(config['experiment']['save_dir']) / network_type / aux_str / self.base_name / self.date_subfolder
+        self.experiment_dir.mkdir(parents=True, exist_ok=True)
+        
+        self.plots_dir = Path('results/plots') / network_type / aux_str / self.base_name / self.date_subfolder
+        self.plots_dir.mkdir(parents=True, exist_ok=True)
+        
+        self.metrics_dir = Path('logs/metrics') / network_type / aux_str / self.base_name
+        self.metrics_dir.mkdir(parents=True, exist_ok=True)
+        self.metrics_path = self.metrics_dir / f"{self.date_subfolder}_metrics.npz"
         
         # Create agent
         self.agent = self._create_agent()
@@ -595,14 +655,19 @@ class ParallelTrainer:
             }
         }
 
-        # Resume from checkpoint if provided (ADDED)
-        resume_path = config['experiment'].get('resume')
+        # Load checkpoint if provided (to restore metrics, optimizer, etc.)
         if resume_path and Path(resume_path).exists():
             self._load_checkpoint(resume_path)
+        
+        # Create vectorized environment (after config may have been restored from checkpoint)
+        self.vector_env = self._create_vectorized_env()
 
     def _create_vectorized_env(self) -> VectorizedMazeEnv:
         """Create vectorized training environment from config (fixed)"""
         env_config = self.config['environment'].copy()
+        # Ensure n_doors is not None (should be set by config)
+        if env_config.get('n_doors') is None and env_config.get('task_class') != 'basic':
+            env_config['n_doors'] = -1  # trigger auto-configuration
         return VectorizedMazeEnv(
             num_envs=self.batch_size,
             env_config=env_config,
@@ -642,20 +707,6 @@ class ParallelTrainer:
             lr=lr,
             weight_decay=weight_decay
         )
-
-    
-    #def _sample_actions_deterministic(self, logits: torch.Tensor) -> torch.Tensor:
-    #    """
-    #    Sample actions deterministically using NumPy (CPU).
-    #    logits: [B, A] on current device.
-    #    Returns: action indices as torch.LongTensor on same device.
-    #    """
-    #    # Move logits to CPU and convert to NumPy
-    #    probs = torch.softmax(logits, dim=-1).cpu().numpy()  # [B, A]
-    #    actions = np.zeros(logits.shape[0], dtype=np.int64)
-    #    for i, p in enumerate(probs):
-    #        actions[i] = np.random.choice(len(p), p=p)   # uses global seeded NumPy RNG
-    #    return torch.from_numpy(actions).to(logits.device)
 
     def _collect_experiences_parallel(self) -> Dict[str, torch.Tensor]:
         """
@@ -702,8 +753,7 @@ class ParallelTrainer:
                 # Sample actions during training
                 if self.agent.network.training:
                     probs = torch.softmax(logits, dim=-1)
-                    actions = torch.multinomial(probs, 1).squeeze(-1)  # [B] # Warning, torch.multinomial may cause small deviations between runs, therefore harming reproducibility
-                    #actions = self._sample_actions_deterministic(logits)
+                    actions = torch.multinomial(probs, 1).squeeze(-1)  # [B]
                 else:
                     actions = logits.argmax(dim=-1)  # [B]
             
@@ -824,14 +874,11 @@ class ParallelTrainer:
         """Get the current environment configuration (static for base trainer)"""
         return self.config['environment'].copy()
     
-
     def _test_valid(self, epochs: int = 10) -> Dict[str, float]:
         """Run `epochs` test epochs, each processing `batch_size` parallel epochs.
         Always tests on complex stage at maximum complexity (1.0) using fixed seeds.
         """
         self.agent.network.eval()
-
-        # env_config = self.get_environment_config()
 
         # Build test environment configuration: always complex, complexity=1.0
         test_env_config = self.config['environment'].copy()
@@ -889,21 +936,15 @@ class ParallelTrainer:
             'avg_length': avg_length
         }
     
-
     def _load_checkpoint(self, checkpoint_path: str):
         """Load training state from a checkpoint file."""
         checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
-        # Restore metrics
         self.metrics = checkpoint['metrics']
-        # Restore optimizer
         self.optimizer.load_state_dict(checkpoint['optimizer_state'])
-        # Restore scheduler
         self.lr_scheduler.load_state_dict(checkpoint['scheduler_state'])
-        # If model state dict is present, load it (optional, usually we load from separate model file)
         if 'model_state_dict' in checkpoint:
             self.agent.network.load_state_dict(checkpoint['model_state_dict'], strict=False)
             print(f"Loaded model weights from checkpoint {checkpoint_path}")
-        # Restore complexity manager if present (for adaptive trainer)
         if hasattr(self, 'complexity_manager') and 'complexity_manager_state' in checkpoint:
             cm_state = checkpoint['complexity_manager_state']
             self.complexity_manager.current_stage_idx = cm_state['current_stage_idx']
@@ -924,23 +965,19 @@ class ParallelTrainer:
         self.logger.info(f"Resumed training from checkpoint at epoch {start_epoch}")
 
     def _save_model(self, name: str):
-        save_dir = Path(self.config['experiment']['save_dir'])
-        save_dir.mkdir(exist_ok=True)
-
         # Save agent model (separate file)
         if name in ['best', 'final']:
-            agent_path = save_dir / f"{self.experiment_name}_{name}.pt"
+            agent_path = self.experiment_dir / f"{self.base_name}_{name}.pt"
             self.agent.save(str(agent_path))
             self.logger.info(f"Saved agent to {agent_path}")
 
         # Save checkpoint (with model weights and config for resume/testing)
-        checkpoint_path = save_dir / f"{self.experiment_name}_{name}_checkpoint.pt"
+        checkpoint_path = self.experiment_dir / f"{self.base_name}_{name}_checkpoint.pt"
         checkpoint = {
             'epoch': len(self.metrics['train_rewards']),
             'optimizer_state': self.optimizer.state_dict(),
             'scheduler_state': self.lr_scheduler.state_dict(),
             'metrics': self.metrics,
-            # Include model state and config for direct loading
             'model_state_dict': self.agent.network.state_dict(),
             'model_config': {
                 'network_type': self.agent.network_type,
@@ -949,19 +986,23 @@ class ParallelTrainer:
                 'observation_size': OBSERVATION_SIZE,
                 'action_size': ACTION_SIZE
             },
-            'config': self.config
+            'config': self.config.copy()
         }
-        if hasattr(self, 'complexity_manager'):
-            checkpoint['complexity_manager_state'] = {
-                'current_stage_idx': self.complexity_manager.current_stage_idx,
-                'performance_history': list(self.complexity_manager.performance_history),
-                'adjustments_made': self.complexity_manager.adjustments_made,
-                'stage_complexities': self.complexity_manager.stage_complexities,
-                'max_rewards_by_stage': self.complexity_manager.max_rewards_by_stage,
-                'epochs_without_progress': self.complexity_manager.epochs_without_progress,
-                'last_complexity_increase_epoch': self.complexity_manager.last_complexity_increase_epoch,
-                'last_max_reward': self.complexity_manager.last_max_reward,
-            }
+        # Store base_name and date_subfolder for resume
+        checkpoint['config']['experiment']['base_name'] = self.base_name
+        checkpoint['config']['experiment']['date_subfolder'] = self.date_subfolder
+        
+        #if hasattr(self, 'complexity_manager'):
+        #    checkpoint['complexity_manager_state'] = {
+        #        'current_stage_idx': self.complexity_manager.current_stage_idx,
+        #        'performance_history': list(self.complexity_manager.performance_history),
+        #        'adjustments_made': self.complexity_manager.adjustments_made,
+        #        'stage_complexities': self.complexity_manager.stage_complexities,
+        #        'max_rewards_by_stage': self.complexity_manager.max_rewards_by_stage,
+        #        'epochs_without_progress': self.complexity_manager.epochs_without_progress,
+        #        'last_complexity_increase_epoch': self.complexity_manager.last_complexity_increase_epoch,
+        #        'last_max_reward': self.complexity_manager.last_max_reward,
+        #    }
         torch.save(checkpoint, str(checkpoint_path))
         self.logger.info(f"Saved checkpoint to {checkpoint_path}")
 
@@ -970,20 +1011,24 @@ class ParallelTrainer:
         metrics_dir = Path('logs/metrics')
         metrics_dir.mkdir(parents=True, exist_ok=True)
         
-        metrics_path = metrics_dir / f"{self.experiment_name}_metrics.npz"
+        # Save thresholds for later plotting
+        increase_threshold = self.config['training'].get('complexity_increase_threshold', 0.6)
+        decrease_threshold = self.config['training'].get('complexity_decrease_threshold', 0.4)
         
-        np.savez(str(metrics_path),
+        np.savez(str(self.metrics_path),
                 train_rewards=self.metrics['train_rewards'],
                 train_losses=self.metrics['train_losses'],
                 test_rewards=self.metrics['test_rewards'],
                 timing_collection=self.metrics['timing']['collection'],
-                timing_training=self.metrics['timing']['training'])
+                timing_training=self.metrics['timing']['training'],
+                increase_threshold=increase_threshold,
+                decrease_threshold=decrease_threshold)
         
         # Plot metrics
         self._plot_metrics()
 
     def _plot_metrics(self):
-        generate_plots_from_metrics(self.metrics, self.experiment_name)
+        generate_plots_from_metrics(self.metrics, self.plots_dir)
 
     def _print_training_summary(self, start_time: float):
         """Print training summary"""
@@ -998,7 +1043,7 @@ class ParallelTrainer:
         print(f"Average epoch time: {avg_collection+avg_training:.3f}s (collection: {avg_collection:.3f}s, training: {avg_training:.3f}s)")
         print(f"Average environment steps per second: {self.batch_size/avg_collection:.1f}")
         print(f"Final best reward: {self.metrics['best_reward']:.2f}")
-        print(f"Model saved as: {self.experiment_name}_best.pt")
+        print(f"Model saved as: {self.base_name}_best.pt")
         print(f"{'='*80}")
     
     def train(self):
@@ -1008,7 +1053,14 @@ class ParallelTrainer:
         save_interval = training_config['save_interval']
         test_interval = training_config['test_interval']
         
-        start_epoch = len(self.metrics['train_rewards'])  # for resume
+        start_epoch = len(self.metrics['train_rewards'])
+        # If already at or beyond target, skip training
+        if start_epoch >= epochs:
+            self.logger.info(f"Already at epoch {start_epoch} >= {epochs}, no training performed.")
+            self._save_metrics()
+            self._print_training_summary(0)
+            return
+        
         pbar = tqdm(range(start_epoch, epochs), desc="Training", unit="epoch", initial=start_epoch, total=epochs)
         start_time = time.time()
         
@@ -1030,7 +1082,7 @@ class ParallelTrainer:
             self.metrics['timing']['training'].append(train_time)
             self.metrics['timing']['total'].append(time.time() - epoch_start)
             
-            if epoch % test_interval == 0:# and epoch != 0:
+            if epoch % test_interval == 0 and epoch != 0:
                 test_metrics = self._test_valid(epochs=4)
                 test_reward = test_metrics['reward']
                 self.metrics['test_rewards'].append(test_reward)
@@ -1054,18 +1106,26 @@ class ParallelTrainer:
 
             self.lr_scheduler.step()
 
-        test_metrics = self._test_valid(epochs=4)
-        test_reward = test_metrics['reward']
-        self.metrics['test_rewards'].append(test_reward)
-        if test_reward > self.metrics['best_reward']:
-            self.metrics['best_reward'] = test_reward
-            self._save_model('best')
-            self.logger.info(f"New best model with reward: {test_reward:.2f}")
-
+        # Final test only if we actually trained new epochs and the last epoch wasn't already a test epoch
+        if len(self.metrics['train_rewards']) > start_epoch:
+            last_epoch = len(self.metrics['train_rewards']) - 1
+            # Check if the last epoch was already tested (test_interval divides last_epoch)
+            is_test_epoch = (test_interval > 0 and last_epoch % test_interval == 0)
+            if not is_test_epoch:
+                test_metrics = self._test_valid(epochs=4)
+                test_reward = test_metrics['reward']
+                self.metrics['test_rewards'].append(test_reward)
+                if test_reward > self.metrics['best_reward']:
+                    self.metrics['best_reward'] = test_reward
+                    self._save_model('best')
+                    self.logger.info(f"New best model with reward: {test_reward:.2f}")
+            else:
+                self.logger.info(f"Epoch {last_epoch} already tested, skipping final test.")
         
         self._save_model('final')
         self._save_metrics()
         self._print_training_summary(start_time)
+
 
 # ============================================================================
 # ADAPTIVE TRAINER (inherits from ParallelTrainer)
@@ -1079,6 +1139,9 @@ class AdaptiveParallelTrainer(ParallelTrainer):
         self.complexity_manager = ComplexityManager(config)
         super().__init__(config)
         
+        # Recreate environment with complexity manager's config (overrides the base environment)
+        if hasattr(self, 'vector_env'):
+            self.vector_env.close()
         self.vector_env = self._create_vectorized_env()
         
         # Extend metrics for complexity tracking
@@ -1089,7 +1152,6 @@ class AdaptiveParallelTrainer(ParallelTrainer):
         # Log initial status
         self.logger.info(f"Dynamic complexity enabled: {self.complexity_manager.get_status()}")
     
-
     def get_environment_config(self):
         """Get dynamic environment configuration from complexity manager"""
         return self.complexity_manager.get_environment_config()
@@ -1120,7 +1182,6 @@ class AdaptiveParallelTrainer(ParallelTrainer):
             abs(adjustment['old_complexity'] - adjustment['new_complexity']) > 0.01):
             self._recreate_vectorized_env()
     
-
     def _visualize_current_environments(self, epoch: int):
         """Visualize a sample of current training environments"""
         print(f"\n📸 Visualizing environments at epoch {epoch}")
@@ -1174,11 +1235,9 @@ class AdaptiveParallelTrainer(ParallelTrainer):
         return stage_map.get(stage, 0.0)
     
     def _save_model(self, name: str):
-        save_dir = Path(self.config['experiment']['save_dir'])
-        save_dir.mkdir(exist_ok=True)
-
+        # Save agent model with extra data
         if name in ['best', 'final']:
-            agent_path = save_dir / f"{self.experiment_name}_{name}.pt"
+            agent_path = self.experiment_dir / f"{self.base_name}_{name}.pt"
             extra_data = {
                 'complexity_status': self.complexity_manager.get_status(),
                 'training_metrics': {
@@ -1192,7 +1251,7 @@ class AdaptiveParallelTrainer(ParallelTrainer):
             self.logger.info(f"Saved agent to {agent_path}")
 
         # Also save checkpoint (same as base trainer)
-        checkpoint_path = save_dir / f"{self.experiment_name}_{name}_checkpoint.pt"
+        checkpoint_path = self.experiment_dir / f"{self.base_name}_{name}_checkpoint.pt"
         checkpoint = {
             'epoch': len(self.metrics['train_rewards']),
             'optimizer_state': self.optimizer.state_dict(),
@@ -1206,6 +1265,7 @@ class AdaptiveParallelTrainer(ParallelTrainer):
                 'observation_size': OBSERVATION_SIZE,
                 'action_size': ACTION_SIZE
             },
+            'config': self.config.copy(),
             'complexity_manager_state': {
                 'current_stage_idx': self.complexity_manager.current_stage_idx,
                 'performance_history': list(self.complexity_manager.performance_history),
@@ -1215,23 +1275,26 @@ class AdaptiveParallelTrainer(ParallelTrainer):
                 'epochs_without_progress': self.complexity_manager.epochs_without_progress,
                 'last_complexity_increase_epoch': self.complexity_manager.last_complexity_increase_epoch,
                 'last_max_reward': self.complexity_manager.last_max_reward,
-            },
-            'config': self.config
+            }
         }
+        checkpoint['config']['experiment']['base_name'] = self.base_name
+        checkpoint['config']['experiment']['date_subfolder'] = self.date_subfolder
         torch.save(checkpoint, str(checkpoint_path))
         self.logger.info(f"Saved checkpoint to {checkpoint_path}")
     
     def _save_metrics(self):
-        """Override to include complexity history"""
+        """Override to include complexity history and thresholds"""
         metrics_dir = Path('logs/metrics')
         metrics_dir.mkdir(parents=True, exist_ok=True)
-        
-        metrics_path = metrics_dir / f"{self.experiment_name}_metrics.npz"
         
         # Convert task class history to numeric for saving
         task_class_numeric = [self._stage_to_numeric(stage) for stage in self.metrics['task_class_history']]
         
-        np.savez(str(metrics_path),
+        # Get thresholds
+        increase_threshold = self.complexity_manager.increase_threshold
+        decrease_threshold = self.complexity_manager.decrease_threshold
+        
+        np.savez(str(self.metrics_path),
                 train_rewards=self.metrics['train_rewards'],
                 train_losses=self.metrics['train_losses'],
                 test_rewards=self.metrics['test_rewards'],
@@ -1239,7 +1302,9 @@ class AdaptiveParallelTrainer(ParallelTrainer):
                 task_class_history=task_class_numeric,
                 performance_scores=self.metrics['performance_scores'],
                 timing_collection=self.metrics['timing']['collection'],
-                timing_training=self.metrics['timing']['training'])
+                timing_training=self.metrics['timing']['training'],
+                increase_threshold=increase_threshold,
+                decrease_threshold=decrease_threshold)
         
         # Plot metrics (uses base class method)
         self._plot_metrics()
@@ -1275,7 +1340,7 @@ class AdaptiveParallelTrainer(ParallelTrainer):
                 print(f"  {stage.capitalize():8s}: epochs {first_epoch:4d}-{last_epoch:4d} "
                       f"({duration:4d} epochs), avg complexity: {avg_complexity:.2f}")
         
-        print(f"\nModel saved as: {self.experiment_name}_best.pt")
+        print(f"\nModel saved as: {self.base_name}_best.pt")
         print(f"{'='*80}")
     
     def train(self):
@@ -1284,6 +1349,14 @@ class AdaptiveParallelTrainer(ParallelTrainer):
         epochs = training_config['epochs']
         save_interval = training_config['save_interval']
         test_interval = training_config['test_interval']
+        
+        start_epoch = len(self.metrics['train_rewards'])
+        # If already at or beyond target, skip training
+        if start_epoch >= epochs:
+            self.logger.info(f"Already at epoch {start_epoch} >= {epochs}, no training performed.")
+            self._save_metrics()
+            self._print_training_summary(0)
+            return
         
         print("\n🎮 Dynamic Complexity Training Controls:")
         print("  Press 'v' to visualize current environments")
@@ -1298,7 +1371,6 @@ class AdaptiveParallelTrainer(ParallelTrainer):
         cv2.imshow('Training Controls', dummy)
         cv2.waitKey(1)
         
-        start_epoch = len(self.metrics['train_rewards'])
         pbar = tqdm(range(start_epoch, epochs), desc="Training", unit="epoch", initial=start_epoch, total=epochs)
         start_time = time.time()
         
@@ -1313,9 +1385,8 @@ class AdaptiveParallelTrainer(ParallelTrainer):
                 cv2.destroyAllWindows()
                 break
 
-            
             if self.complexity_manager.epochs_without_progress >= self.complexity_manager.stagnation_termination:
-                return True
+                break
             
             epoch_start = time.time()
             coll_start = time.time()
@@ -1346,8 +1417,7 @@ class AdaptiveParallelTrainer(ParallelTrainer):
             self.metrics['complexity_history'].append(self.complexity_manager.get_current_complexity())
             self.metrics['task_class_history'].append(self.complexity_manager.get_current_task_class())
             
-            
-            if epoch % test_interval == 0:# and epoch != 0:
+            if epoch % test_interval == 0 and epoch != 0:
                 test_metrics = self._test_valid(epochs=4)
                 test_reward = test_metrics['reward']
                 self.metrics['test_rewards'].append(test_reward)
@@ -1375,15 +1445,22 @@ class AdaptiveParallelTrainer(ParallelTrainer):
             
             self.lr_scheduler.step()
 
-        test_metrics = self._test_valid(epochs=4)
-        test_reward = test_metrics['reward']
-        self.metrics['test_rewards'].append(test_reward)
-        if test_reward > self.metrics['best_reward']:
-            self.metrics['best_reward'] = test_reward
-            self._save_model('best')
-            self.logger.info(f"New best model with reward: {test_reward:.2f}")
+        # Final test only if we actually trained new epochs and the last epoch wasn't already a test epoch
+        if len(self.metrics['train_rewards']) > start_epoch:
+            last_epoch = len(self.metrics['train_rewards']) - 1
+            # Check if the last epoch was already tested (test_interval divides last_epoch)
+            is_test_epoch = (test_interval > 0 and last_epoch % test_interval == 0)
+            if not is_test_epoch:
+                test_metrics = self._test_valid(epochs=4)
+                test_reward = test_metrics['reward']
+                self.metrics['test_rewards'].append(test_reward)
+                if test_reward > self.metrics['best_reward']:
+                    self.metrics['best_reward'] = test_reward
+                    self._save_model('best')
+                    self.logger.info(f"New best model with reward: {test_reward:.2f}")
+            else:
+                self.logger.info(f"Epoch {last_epoch} already tested, skipping final test.")
 
-        
         self._save_model('final')
         self._save_metrics()
         self._print_training_summary(start_time)

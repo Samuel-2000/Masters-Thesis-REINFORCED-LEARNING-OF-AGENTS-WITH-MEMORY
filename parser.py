@@ -26,10 +26,10 @@ def parse_args():
             python run.py test --play --episodes 1 --dynamic-complexity [--stages basic doors buttons --complexities 0.0 0.5 1.0]
 
             # Plot saved metrics
-            python run.py plot --experiment-name lstm_64b_0.0005lr_2026-04-28_11-35-00
+            python run.py plot --network-type lstm --aux --experiment-name lstm_64b_0.0005lr_2026-04-28_11-35-00
 
             # Resume training
-            python run.py train --network-type lstm --epochs 10000 --batch-size 64 --lr 0.0005 --resume models/lstm_16b_0.0005lr_2026-04-28_11-35-00_best_checkpoint.pt
+            python run.py train --network-type lstm --epochs 10000 --batch-size 64 --lr 0.0005 --resume models/lstm/aux/lstm_64b_0.0005lr_2026-04-28_11-35-00/lstm_64b_0.0005lr_2026-04-28_11-35-00_epoch_000100_checkpoint.pt
 
 
         """
@@ -143,17 +143,15 @@ def parse_args():
     # ---------- Post‑processing validation ----------
 
     required_env = []
-
-    if not args.resume:
-
-        if bool(args.dynamic_complexity) == bool(args.task_class):
-            raise "either use dynamic_complexity or choose task_class"
-        
-        if bool(args.dynamic_complexity) == (args.complexity_level is not None):
-            raise "either use dynamic_complexity or choose complexity_level"
-        
-        if bool(args.dynamic_complexity) and bool(any([args.n_doors, args.n_buttons_per_door, args.button_break_probability])):
-            raise "either use dynamic_complexity or choose door and button parameters"
+    
+    if bool(args.dynamic_complexity) == bool(args.task_class):
+        raise "either use dynamic_complexity or choose task_class"
+    
+    if bool(args.dynamic_complexity) == (args.complexity_level is not None):
+        raise "either use dynamic_complexity or choose complexity_level"
+    
+    if bool(args.dynamic_complexity) and bool(any([args.n_doors, args.n_buttons_per_door, args.button_break_probability])):
+        raise "either use dynamic_complexity or choose door and button parameters"
 
 
     elif args.command == "test":

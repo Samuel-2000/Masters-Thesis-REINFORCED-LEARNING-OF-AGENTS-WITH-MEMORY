@@ -13,7 +13,7 @@ from src.core.human_agent import HumanAgent
 from src.core.utils import get_model_name_from_path
 from src.evaluation.benchmark import Benchmark
 from src.evaluation.visualization import Visualizer
-from src.training.trainer import Trainer, generate_plots_from_metrics   # MODIFIED: import generate_plots_from_metrics
+from src.training.trainer import Trainer, generate_plots_from_metrics
 from src.core.constants import (
     DEFAULT_GRID_SIZE, DEFAULT_MAX_STEPS, DEFAULT_OBSTACLE_FRACTION,
     DEFAULT_FOOD_SOURCES, DEFAULT_FOOD_ENERGY, DEFAULT_INITIAL_ENERGY,
@@ -60,7 +60,7 @@ def main():
                 "name": args.experiment_name or f"{args.network_type}_{args.batch_size}b_{args.lr}lr",
                 "save_dir": args.save_dir,
                 "seed": args.seed,
-                "resume": args.resume,          # ADDED
+                "resume": args.resume
             },
             "environment": env_config,
             "model": {
@@ -128,9 +128,11 @@ def main():
                 results = agent.test(env, args.episodes, args.visualize, args.save_video, model_name)
             print(f"  Reward: {results['avg_reward']:.2f}, Success: {results['success_rate']:.1f}%")
 
-    elif args.command == "plot":          # ADDED BLOCK
+    elif args.command == "plot":
         import numpy as np
-        metrics_path = Path("logs/metrics") / f"{args.experiment_name}_metrics.npz"
+        aux_str = 'aux' if args.aux else 'no_aux'
+        metrics_dir = Path("logs/metrics") / args.network_type / aux_str
+        metrics_path = metrics_dir / f"{args.experiment_name}_metrics.npz"
         if not metrics_path.exists():
             raise FileNotFoundError(f"Metrics file not found: {metrics_path}")
         data = np.load(metrics_path, allow_pickle=True)
@@ -139,8 +141,9 @@ def main():
         if 'task_class_history' in metrics and metrics['task_class_history'].dtype.kind in 'iuf':
             stage_map = {0.0: 'basic', 0.33: 'doors', 0.66: 'buttons', 1.0: 'complex'}
             metrics['task_class_history'] = [stage_map.get(v, 'unknown') for v in metrics['task_class_history']]
-        generate_plots_from_metrics(metrics, args.experiment_name, args.output_dir)
-        print(f"Plots saved to {args.output_dir}/{args.experiment_name}/")
+        plots_dir = Path("results/plots") / args.network_type / aux_str / args.experiment_name
+        generate_plots_from_metrics(metrics, plots_dir)
+        print(f"Plots saved to {plots_dir}")
 
         """
         elif args.command == "benchmark":
