@@ -182,6 +182,8 @@ ACTION_SIZE = NUM_ACTIONS
 # ============================================================================
 
 # Food
+FOOD_COUNT_MAX = 6
+FOOD_COUNT_MIN = 2
 MIN_FOOD_REGEN_TIME = 10
 MAX_FOOD_REGEN_TIME = 30
 FOOD_INTERVAL_INDEX = 2

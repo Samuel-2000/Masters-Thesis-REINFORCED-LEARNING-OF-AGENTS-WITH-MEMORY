@@ -26,7 +26,7 @@ def parse_args():
             python run.py test --play --episodes 1 --dynamic-complexity [--stages basic doors buttons --complexities 0.0 0.5 1.0]
 
             # Plot saved metrics
-            python run.py plot --network-type lstm --aux --experiment-name lstm_64b_0.0005lr_2026-04-28_11-35-00
+            python run.py plot --experiment-name ./models/lstm/no_aux/lstm_64b_0.0005lr/2026-04-30_22-35-53/lstm_64b_0.0005lr_final_checkpoint.pt
 
             # Resume training
             python run.py train --network-type lstm --epochs 10000 --batch-size 64 --lr 0.0005 --resume models/lstm/aux/lstm_64b_0.0005lr_2026-04-28_11-35-00/lstm_64b_0.0005lr_2026-04-28_11-35-00_epoch_000100_checkpoint.pt
@@ -143,7 +143,11 @@ def parse_args():
     # ---------- Post‑processing validation ----------
 
     required_env = []
-    
+
+    if args.command == "plot":
+        return args
+
+
     if bool(args.dynamic_complexity) == bool(args.task_class):
         raise "either use dynamic_complexity or choose task_class"
     
@@ -174,7 +178,7 @@ def parse_args():
     if args.dynamic_complexity:
         defaults.update({
             "performance_window": 10,
-            "complexity_increase_threshold": 0.6,
+            "complexity_increase_threshold": 0.65,
             "complexity_decrease_threshold": 0.4,
             "complexity_step": 0.05,
             "min_complexity": 0.0,

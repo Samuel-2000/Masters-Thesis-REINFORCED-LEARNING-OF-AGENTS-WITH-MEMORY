@@ -29,7 +29,7 @@ from src.core.constants import (
 # ============================================================================
 # STANDALONE PLOTTING FUNCTION (with safe array length and exact test epochs)
 # ============================================================================
-def generate_plots_from_metrics(metrics: Dict[str, Any], plots_dir: Path):
+def generate_plots_from_metrics(metrics: Dict[str, Any], plots_dir: Path, increase_threshold: float, decrease_threshold: float):
     """Generate all training plots from a metrics dictionary."""
     import matplotlib.pyplot as plt
 
@@ -154,10 +154,8 @@ def generate_plots_from_metrics(metrics: Dict[str, Any], plots_dir: Path):
             if start < len(perf_epochs):
                 ax.plot(perf_epochs[start:], scores[start:], color=colors[len(change_indices) % 2], linewidth=1.5)
             # Threshold lines
-            inc_threshold = metrics.get('increase_threshold', 0.6)
-            dec_threshold = metrics.get('decrease_threshold', 0.4)
-            ax.axhline(inc_threshold, color='green', linestyle='--', alpha=0.7, label=f'Increase ({inc_threshold})')
-            ax.axhline(dec_threshold, color='red', linestyle='--', alpha=0.7, label=f'Decrease ({dec_threshold})')
+            ax.axhline(increase_threshold, color='green', linestyle='--', alpha=0.7, label=f'Increase ({increase_threshold})')
+            ax.axhline(decrease_threshold, color='red', linestyle='--', alpha=0.7, label=f'Decrease ({decrease_threshold})')
             ax.legend()
             ax.set_title('Performance Scores (colored by config change)')
             ax.set_xlabel('Epoch')
@@ -493,19 +491,19 @@ class ComplexityManager:
                 env_config['button_break_probability'] = 0.0
                 
             elif current_stage == 'doors':
-                env_config['n_doors'] = -1
+                env_config['n_doors'] = None
                 env_config['n_buttons_per_door'] = 0
                 env_config['button_break_probability'] = 0.0
                 
             elif current_stage == 'buttons':
-                env_config['n_doors'] = -1
-                env_config['n_buttons_per_door'] = -1
-                env_config['button_break_probability'] = -1.0
+                env_config['n_doors'] = None
+                env_config['n_buttons_per_door'] = None
+                env_config['button_break_probability'] = None
                 
             elif current_stage == 'complex':
-                env_config['n_doors'] = -1
-                env_config['n_buttons_per_door'] = -1
-                env_config['button_break_probability'] = -1.0
+                env_config['n_doors'] = None
+                env_config['n_buttons_per_door'] = None
+                env_config['button_break_probability'] = None
         
         return env_config
     
@@ -608,7 +606,7 @@ class ParallelTrainer:
         
         self.metrics_dir = Path('logs/metrics') / network_type / aux_str / self.base_name
         self.metrics_dir.mkdir(parents=True, exist_ok=True)
-        self.metrics_path = self.metrics_dir / f"{self.date_subfolder}_metrics.npz"
+        self.metrics_path = self.metrics_dir / "metrics.npz"
         
         # Create agent
         self.agent = self._create_agent()
@@ -991,12 +989,12 @@ class ParallelTrainer:
     def _save_model(self, name: str):
         # Save agent model (separate file)
         if name in ['best', 'final']:
-            agent_path = self.experiment_dir / f"{self.base_name}_{name}.pt"
+            agent_path = self.experiment_dir / f"{name}.pt"
             self.agent.save(str(agent_path))
             self.logger.info(f"Saved agent to {agent_path}")
 
         # Save checkpoint (with model weights and config for resume/testing)
-        checkpoint_path = self.experiment_dir / f"{self.base_name}_{name}_checkpoint.pt"
+        checkpoint_path = self.experiment_dir / f"{name}_checkpoint.pt"
         checkpoint = {
             'epoch': len(self.metrics['train_rewards']),
             'optimizer_state': self.optimizer.state_dict(),
@@ -1036,7 +1034,7 @@ class ParallelTrainer:
         metrics_dir.mkdir(parents=True, exist_ok=True)
         
         # Save thresholds for later plotting
-        increase_threshold = self.config['training'].get('complexity_increase_threshold', 0.6)
+        increase_threshold = self.config['training'].get('complexity_increase_threshold', 0.65)
         decrease_threshold = self.config['training'].get('complexity_decrease_threshold', 0.4)
         
         np.savez(str(self.metrics_path),
@@ -1053,7 +1051,9 @@ class ParallelTrainer:
         self._plot_metrics()
 
     def _plot_metrics(self):
-        generate_plots_from_metrics(self.metrics, self.plots_dir)
+        increase_threshold = self.config['training'].get('complexity_increase_threshold', 0.65)
+        decrease_threshold = self.config['training'].get('complexity_decrease_threshold', 0.4)
+        generate_plots_from_metrics(self.metrics, self.plots_dir, increase_threshold, decrease_threshold)
 
     def _print_training_summary(self, start_time: float):
         """Print training summary"""
@@ -1277,7 +1277,7 @@ class AdaptiveParallelTrainer(ParallelTrainer):
     def _save_model(self, name: str):
         # Save agent model with extra data
         if name in ['best', 'final']:
-            agent_path = self.experiment_dir / f"{self.base_name}_{name}.pt"
+            agent_path = self.experiment_dir / f"{name}.pt"
             extra_data = {
                 'complexity_status': self.complexity_manager.get_status(),
                 'training_metrics': {
@@ -1291,7 +1291,7 @@ class AdaptiveParallelTrainer(ParallelTrainer):
             self.logger.info(f"Saved agent to {agent_path}")
 
         # Also save checkpoint (same as base trainer)
-        checkpoint_path = self.experiment_dir / f"{self.base_name}_{name}_checkpoint.pt"
+        checkpoint_path = self.experiment_dir / f"{name}_checkpoint.pt"
         checkpoint = {
             'epoch': len(self.metrics['train_rewards']),
             'optimizer_state': self.optimizer.state_dict(),

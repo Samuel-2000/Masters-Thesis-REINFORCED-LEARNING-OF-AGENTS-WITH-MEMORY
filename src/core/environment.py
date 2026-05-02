@@ -15,9 +15,8 @@ from .constants import (
     Actions, NUM_ACTIONS, ENV_ACTIONS_START,
     TileType, TILE_COLORS,
     TaskClass,
-    FOOD_INTERVAL_INDEX, FOOD_EXISTS_INDEX, MIN_FOOD_REGEN_TIME, MAX_FOOD_REGEN_TIME
+    FOOD_COUNT_MAX, FOOD_COUNT_MIN, FOOD_INTERVAL_INDEX, FOOD_EXISTS_INDEX, MIN_FOOD_REGEN_TIME, MAX_FOOD_REGEN_TIME
 )
-
 
 @njit(cache=True)
 def _label_components_numba_inplace(pass_mask: np.ndarray, labels: np.ndarray):
@@ -564,23 +563,58 @@ def bfs_reachable_mask(passable_mask: np.ndarray, h: int, w: int,
 
 # ------------------------- GridMazeWorld -------------------------------
 class GridMazeWorld(gym.Env):
+    # Cache for ring offsets across all instances (grid_size is fixed)
+    _ring_offsets_cache = {}
+
+    @classmethod
+    def _get_ring_offsets(cls, grid_size: int):
+        """Return precomputed Manhattan ring offsets for a given grid size."""
+        if grid_size not in cls._ring_offsets_cache:
+            max_dist = 2 * (grid_size - 1)
+            ring_offsets = [[] for _ in range(max_dist + 1)]
+            ring_offsets[0] = [(0, 0)]
+            for d in range(1, max_dist + 1):
+                offsets = set()
+                for dy in range(-d, d + 1):
+                    dx = d - abs(dy)
+                    if dx == 0:
+                        offsets.add((dy, 0))
+                    else:
+                        offsets.add((dy, dx))
+                        offsets.add((dy, -dx))
+                ring_offsets[d] = list(offsets)
+            cls._ring_offsets_cache[grid_size] = ring_offsets
+        return cls._ring_offsets_cache[grid_size]
+    
     def __init__(self, grid_size: int, max_steps: int, obstacle_fraction: float, 
                  n_food_sources: int, food_energy: float, initial_energy: float,
                  energy_decay: float, energy_per_step: float,
                  render_size: int, task_class: str, complexity_level: float,
                  n_doors: int, door_open_duration: int, door_close_duration: int,
                  n_buttons_per_door: int, button_break_probability: float):
+        
+
+
         super().__init__()
         self.grid_size = grid_size
+        self._ring_offsets = self._get_ring_offsets(self.grid_size)
         self.max_steps = max_steps
-        self.n_food_sources = n_food_sources
+        self.task_class = task_class
+        self.complexity_level = 0.5 if complexity_level is None else max(0.0, min(1.0, complexity_level))
+
+        # Randomize n_food_sources based on complexity
+        # Binomial trial with p = (1 - complexity), but ensure a small chance of extra even at high complexity
+        p = max(0.05, 1.0 - self.complexity_level)
+        extra_max = FOOD_COUNT_MAX - FOOD_COUNT_MIN
+        extra = np.random.binomial(extra_max, p)
+        self.n_food_sources = FOOD_COUNT_MIN + extra
+
         self.food_energy = food_energy
         self.initial_energy = initial_energy
         self.energy_decay = energy_decay
         self.energy_per_step = energy_per_step
         self.render_size = render_size
-        self.task_class = task_class
-        self.complexity_level = 0.5 if complexity_level is None else max(0.0, min(1.0, complexity_level))
+
         self.door_open_duration = door_open_duration
         self.door_close_duration = door_close_duration
         self.n_doors = n_doors
@@ -958,13 +992,17 @@ class GridMazeWorld(gym.Env):
         self.grid[:, 0] = TileType.OBSTACLE
         self.grid[:, -1] = TileType.OBSTACLE
         self.grid = add_obstacles_connectivity(self.grid, self.n_obstacles)
-        self._init_food_sources()
-        self.door_open_array = np.zeros((self.grid_size, self.grid_size), dtype=np.uint8)
-        self._init_doors_and_buttons()
+
+        # Initialize caches BEFORE they are used by food/doors initialization
         self.food_positions_cache = np.zeros((self.grid_size, self.grid_size), dtype=np.int8)
-        self._update_food_cache()
-        # Ensure passable mask is initialized
+        self.door_open_array = np.zeros((self.grid_size, self.grid_size), dtype=np.uint8)
+
+        self._init_food_sources()          # calls _update_food_cache internally (cache now exists)
+        self._init_doors_and_buttons()     # uses door_open_array
+
+        # Ensure passable mask is updated after all placements
         self._update_passable_mask()
+
         empty_cells = np.argwhere(self.grid == TileType.EMPTY)
         if len(empty_cells) == 0:
             empty_cells = np.argwhere(self.grid != TileType.OBSTACLE)
@@ -973,12 +1011,22 @@ class GridMazeWorld(gym.Env):
         self.steps = 0
         self.done = False
         self.last_action = ENV_ACTIONS_START
-        info = {'energy': self.energy, 'steps': self.steps, 'position': self.agent_pos.copy(), 'task_class': self.task_class, 'complexity_level': self.complexity_level, 'n_doors': len(self.doors), 'n_buttons': len(self.buttons)}
+        info = {
+            'energy': self.energy,
+            'steps': self.steps,
+            'position': self.agent_pos.copy(),
+            'task_class': self.task_class,
+            'complexity_level': self.complexity_level,
+            'n_doors': len(self.doors),
+            'n_buttons': len(self.buttons)
+        }
         obs = self._get_observation()
         if self.debug:
             print(f"\nReset Environment:\n  Doors: {len(self.doors)}, Buttons: {len(self.buttons)}\n  Agent pos: {self.agent_pos}")
         return obs, info
 
+    
+    """
     def _init_food_sources(self):
         empty_cells = np.argwhere(self.grid == TileType.EMPTY)
         if len(empty_cells) == 0 or self.n_food_sources <= 0:
@@ -991,6 +1039,152 @@ class GridMazeWorld(gym.Env):
             regen_time = np.random.randint(MIN_FOOD_REGEN_TIME, MAX_FOOD_REGEN_TIME)
             self.food_sources[i] = [y, x, regen_time, 1]
             self.grid[y, x] = TileType.FOOD_SOURCE
+
+    """
+    
+    def _init_food_sources(self):
+        rng = np.random
+        n_food = self.n_food_sources
+
+        empty_cells = np.argwhere(self.grid == TileType.EMPTY)
+        N = len(empty_cells)
+        if N == 0 or n_food <= 0:
+            self.food_sources = np.zeros((0, 4), dtype=np.int32)
+            return
+
+        n_food = min(n_food, N)
+        size = self.grid_size
+        centre = (size - 1) * 0.5
+        ec = empty_cells.astype(np.float32)
+
+        # Centre-biased pool
+        dist = np.abs(ec[:, 0] - centre) + np.abs(ec[:, 1] - centre)
+        centre_count = min(N, max(n_food, N // 4))
+        centre_pool = np.argpartition(dist, centre_count - 1)[:centre_count]
+        rng.shuffle(centre_pool)
+
+        # Spread pool: regular spatial subsample with random offset
+        k = max(2, int(np.sqrt(N / max(n_food, 1))))
+        oy = rng.randint(0, k)
+        ox = rng.randint(0, k)
+        spread_mask = ((empty_cells[:, 0] - oy) % k == 0) & ((empty_cells[:, 1] - ox) % k == 0)
+        spread_pool = np.flatnonzero(spread_mask)
+        rng.shuffle(spread_pool)
+
+        # Smooth split by complexity
+        c = float(self.complexity_level)
+        n_centre = int((1.0 - c) * n_food)
+        n_centre = max(0, min(n_centre, n_food))
+
+        chosen = np.empty(n_food, dtype=np.int32)
+        used = np.zeros(N, dtype=bool)
+        pos = 0
+
+        if n_centre > 0:
+            centre_part = centre_pool[:n_centre]
+            chosen[:len(centre_part)] = centre_part
+            used[centre_part] = True
+            pos = len(centre_part)
+
+        if pos < n_food:
+            spread_avail = spread_pool[~used[spread_pool]]
+            take = min(n_food - pos, len(spread_avail))
+            if take > 0:
+                part = spread_avail[:take]
+                chosen[pos:pos + take] = part
+                used[part] = True
+                pos += take
+
+        if pos < n_food:
+            remaining = np.flatnonzero(~used)
+            extra = rng.choice(remaining, size=n_food - pos, replace=False)
+            chosen[pos:] = extra
+
+        self.food_sources = np.zeros((n_food, 4), dtype=np.int32)
+        regen = rng.randint(MIN_FOOD_REGEN_TIME, MAX_FOOD_REGEN_TIME, size=n_food)
+
+        for i, idx in enumerate(chosen):
+            y, x = empty_cells[idx]
+            self.food_sources[i] = [y, x, regen[i], 1]
+            self.grid[y, x] = TileType.FOOD_SOURCE
+
+        self._update_food_cache()
+
+
+    """
+    def _init_food_sources(self):
+        empty_cells = [tuple(cell) for cell in np.argwhere(self.grid == TileType.EMPTY)]
+        if len(empty_cells) == 0 or self.n_food_sources <= 0:
+            self.food_sources = np.zeros((0, 4), dtype=np.int32)
+            return
+
+        self.food_sources = np.zeros((self.n_food_sources, 4), dtype=np.int32)
+        center = self.grid_size // 2
+
+        # Gaussian distribution for row/col sampling
+        std = (1.0 + self.complexity_level * (center - 1))
+        indices = np.arange(self.grid_size)
+        probs = np.exp(-0.5 * ((indices - center) / std) ** 2)
+        probs /= probs.sum()
+
+        empty_set = set(empty_cells)
+        size = self.grid_size
+        ring_offsets = self._ring_offsets
+
+        # Repulsion strength scales with complexity (0 = none, 1 = full)
+        strength = (0.1 + self.complexity_level) * size
+
+        for i in range(self.n_food_sources):
+            row = np.random.choice(size, p=probs)
+            col = np.random.choice(size, p=probs)
+
+            # Single‑step repulsion from already placed foods
+            dx_total = 0.0
+            dy_total = 0.0
+            for j in range(i):
+                other_y = self.food_sources[j, 0]
+                other_x = self.food_sources[j, 1]
+                dy = row - other_y
+                dx = col - other_x
+                dist = abs(dy) + abs(dx)
+                if dist == 0:
+                    # Random push if exactly overlapping
+                    dx_total += np.random.uniform(-1, 1) * strength
+                    dy_total += np.random.uniform(-1, 1) * strength
+                else:
+                    # Force = strength / (dist + ε) ; direction away
+                    force = strength / (dist + 1e-6)
+                    dx_total += force * (dx / dist)
+                    dy_total += force * (dy / dist)
+
+            # Apply displacement once
+            row = int(np.clip(row + dy_total, 0, size - 1))
+            col = int(np.clip(col + dx_total, 0, size - 1))
+
+            #print(f"dx_total: {int(dx_total)}, dy_total: {int(dy_total)}, row: {row}, col: {col}")
+
+            # Find nearest empty cell (spiral search)
+            found = False
+            for d in range(len(ring_offsets)):
+                for dy, dx in ring_offsets[d]:
+                    ny, nx = row + dy, col + dx
+                    if 0 <= ny < size and 0 <= nx < size and (ny, nx) in empty_set:
+                        row, col = ny, nx
+                        found = True
+                        break
+                if found:
+                    break
+            if not found:
+                row, col = next(iter(empty_set))
+
+            regen = np.random.randint(MIN_FOOD_REGEN_TIME, MAX_FOOD_REGEN_TIME)
+            self.food_sources[i] = [row, col, regen, 1]
+            self.grid[row, col] = TileType.FOOD_SOURCE
+            empty_set.remove((row, col))
+
+        self._update_food_cache()
+    """
+       
 
     def _update_food_cache(self):
         if self.food_sources is None or self.food_sources.shape[0] == 0:

@@ -4,6 +4,7 @@ import sys
 from pathlib import Path
 from parser import parse_args
 from datetime import datetime
+import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 
@@ -33,6 +34,39 @@ def main():
     Path("results/plots").mkdir(parents=True, exist_ok=True)
     Path("results/videos").mkdir(parents=True, exist_ok=True)
 
+
+    if args.command == "plot":
+        checkpoint_path = Path(args.experiment_name)
+        if not checkpoint_path.exists():
+            raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
+
+        parts = checkpoint_path.parts
+        date_subfolder = parts[-2]
+        base_name = parts[-3]
+        aux_str = parts[-4]
+        network_type = parts[-5]
+
+        metrics_path = Path("logs/metrics") / network_type / aux_str / base_name / f"{date_subfolder}_metrics.npz"
+        if not metrics_path.exists():
+            raise FileNotFoundError(f"Metrics file not found: {metrics_path}")
+
+        data = np.load(metrics_path, allow_pickle=True)
+        metrics = {key: data[key] for key in data.files}
+
+        # Convert numeric task class back to strings
+        if 'task_class_history' in metrics and metrics['task_class_history'].dtype.kind in 'iuf':
+            stage_map = {0.0: 'basic', 0.33: 'doors', 0.66: 'buttons', 1.0: 'complex'}
+            metrics['task_class_history'] = [stage_map.get(v, 'unknown') for v in metrics['task_class_history']]
+
+        # Extract thresholds (defaults if missing)
+        increase_threshold = metrics.get('increase_threshold', 0.65)
+        decrease_threshold = metrics.get('decrease_threshold', 0.4)
+
+        plots_dir = Path("results/plots") / network_type / aux_str / base_name / date_subfolder
+        # Pass the extra arguments
+        generate_plots_from_metrics(metrics, plots_dir, increase_threshold, decrease_threshold)
+        print(f"Plots saved to {plots_dir}")
+        return
 
     env_config = {
         "grid_size": DEFAULT_GRID_SIZE,
@@ -128,22 +162,6 @@ def main():
                 results = agent.test(env, args.episodes, args.visualize, args.save_video, model_name)
             print(f"  Reward: {results['avg_reward']:.2f}, Success: {results['success_rate']:.1f}%")
 
-    elif args.command == "plot":
-        import numpy as np
-        aux_str = 'aux' if args.aux else 'no_aux'
-        metrics_dir = Path("logs/metrics") / args.network_type / aux_str
-        metrics_path = metrics_dir / f"{args.experiment_name}_metrics.npz"
-        if not metrics_path.exists():
-            raise FileNotFoundError(f"Metrics file not found: {metrics_path}")
-        data = np.load(metrics_path, allow_pickle=True)
-        metrics = {key: data[key] for key in data.files}
-        # Convert numeric task class back to strings if stored as numbers
-        if 'task_class_history' in metrics and metrics['task_class_history'].dtype.kind in 'iuf':
-            stage_map = {0.0: 'basic', 0.33: 'doors', 0.66: 'buttons', 1.0: 'complex'}
-            metrics['task_class_history'] = [stage_map.get(v, 'unknown') for v in metrics['task_class_history']]
-        plots_dir = Path("results/plots") / args.network_type / aux_str / args.experiment_name
-        generate_plots_from_metrics(metrics, plots_dir)
-        print(f"Plots saved to {plots_dir}")
 
         """
         elif args.command == "benchmark":
