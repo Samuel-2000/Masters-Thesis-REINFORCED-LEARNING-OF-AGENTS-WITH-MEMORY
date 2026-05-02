@@ -182,12 +182,18 @@ ACTION_SIZE = NUM_ACTIONS
 # ============================================================================
 
 # Food
-FOOD_COUNT_MAX = 6
-FOOD_COUNT_MIN = 2
+FOOD_COUNT_MAX = 5
+FOOD_COUNT_MIN = 3
 MIN_FOOD_REGEN_TIME = 10
 MAX_FOOD_REGEN_TIME = 30
-FOOD_INTERVAL_INDEX = 2
-FOOD_EXISTS_INDEX = 3
+FOOD_REGEN_GROWTH_FACTOR = 1.2 # Regeneration growth factor per collection
+
+FOOD_INTERVAL_INDEX = 2 # current regeneration delay (steps until reappearance)
+FOOD_EXISTS_INDEX = 3 # 1 = food present, 0 = absent
+FOOD_COLLECTION_COUNT_INDEX = 4   # how many times this source has been eaten this episode
+
+
+
 
 class TaskClass:
     """Task class definitions"""

@@ -15,7 +15,8 @@ from .constants import (
     Actions, NUM_ACTIONS, ENV_ACTIONS_START,
     TileType, TILE_COLORS,
     TaskClass,
-    FOOD_COUNT_MAX, FOOD_COUNT_MIN, FOOD_INTERVAL_INDEX, FOOD_EXISTS_INDEX, MIN_FOOD_REGEN_TIME, MAX_FOOD_REGEN_TIME
+    FOOD_COUNT_MAX, FOOD_COUNT_MIN, MIN_FOOD_REGEN_TIME, MAX_FOOD_REGEN_TIME, FOOD_REGEN_GROWTH_FACTOR, 
+    FOOD_INTERVAL_INDEX, FOOD_EXISTS_INDEX, FOOD_COLLECTION_COUNT_INDEX
 )
 
 @njit(cache=True)
@@ -415,11 +416,17 @@ def food_step(agent_y: int, agent_x: int, food_sources: np.ndarray, food_energy:
     energy_gained = 0.0
     n_food = food_sources.shape[0]
     for i in prange(n_food):
-        y, x, time_left, has_food = food_sources[i]
+        y, x, time_left, has_food, collect_cnt = food_sources[i]
         if agent_y == y and agent_x == x and has_food:
-            energy_gained += food_energy
-            food_sources[i, FOOD_INTERVAL_INDEX] = np.random.randint(MIN_FOOD_REGEN_TIME, MAX_FOOD_REGEN_TIME)
             food_sources[i, FOOD_EXISTS_INDEX] = 0
+            energy_gained += food_energy
+            
+            new_cnt = collect_cnt + 1
+            food_sources[i, FOOD_COLLECTION_COUNT_INDEX] = new_cnt
+
+            base_regen = np.random.randint(MIN_FOOD_REGEN_TIME, MAX_FOOD_REGEN_TIME)
+            new_delay = base_regen * (FOOD_REGEN_GROWTH_FACTOR ** new_cnt)
+            food_sources[i, FOOD_INTERVAL_INDEX] = int(new_delay)
         elif time_left > 0:
             food_sources[i, FOOD_INTERVAL_INDEX] = time_left - 1
         elif time_left == 0:
@@ -640,7 +647,7 @@ class GridMazeWorld(gym.Env):
 
 
 
-        # Create optimized template matcher using 16 templates
+        # Create optimized template matcher using 12 templates
         templates_flat = self._templates_flat_list()
         self.template_matcher = FastTemplateMatcher(templates_flat, max_depth=4)
 
@@ -693,7 +700,7 @@ class GridMazeWorld(gym.Env):
             np.array([[-1,  1, -1], [-1,  0,  0], [-1,  0,  1]], dtype=np.int8),  # T_e
             np.array([[-1, -1, -1], [ 1,  0,  0], [-1,  0,  1]], dtype=np.int8),  # T_T_fhoriz
             np.array([[ 1,  0, -1], [ 0,  0, -1], [-1,  1, -1]], dtype=np.int8),  # T_g
-            np.array([[ 1,  0, -1], [ 0,  0,  1], [-1, -1, -1]], dtype=np.int8)  # T_h
+            np.array([[ 1,  0, -1], [ 0,  0,  1], [-1, -1, -1]], dtype=np.int8)   # T_h
         ]
         # flatten row-major
         return [t.flatten() for t in templates_3x3]
@@ -1049,7 +1056,7 @@ class GridMazeWorld(gym.Env):
         empty_cells = np.argwhere(self.grid == TileType.EMPTY)
         N = len(empty_cells)
         if N == 0 or n_food <= 0:
-            self.food_sources = np.zeros((0, 4), dtype=np.int32)
+            self.food_sources = np.zeros((0, 5), dtype=np.int32)
             return
 
         n_food = min(n_food, N)
@@ -1100,12 +1107,12 @@ class GridMazeWorld(gym.Env):
             extra = rng.choice(remaining, size=n_food - pos, replace=False)
             chosen[pos:] = extra
 
-        self.food_sources = np.zeros((n_food, 4), dtype=np.int32)
+        self.food_sources = np.zeros((n_food, 5), dtype=np.int32)
         regen = rng.randint(MIN_FOOD_REGEN_TIME, MAX_FOOD_REGEN_TIME, size=n_food)
 
         for i, idx in enumerate(chosen):
             y, x = empty_cells[idx]
-            self.food_sources[i] = [y, x, regen[i], 1]
+            self.food_sources[i] = [y, x, regen[i], 1, 0]
             self.grid[y, x] = TileType.FOOD_SOURCE
 
         self._update_food_cache()
@@ -1191,7 +1198,7 @@ class GridMazeWorld(gym.Env):
             return
         self.food_positions_cache.fill(0)
         for i in range(self.food_sources.shape[0]):
-            y, x, _, has_food = self.food_sources[i]
+            y, x, _, has_food, _ = self.food_sources[i]
             if has_food:
                 self.food_positions_cache[y, x] = 1
 
@@ -1372,21 +1379,13 @@ class GridMazeWorld(gym.Env):
 
         # Draw door numbers
         for door in self.doors:
-            y_start = door.y * self._cell_size
-            x_start = door.x * self._cell_size
             center_y = int((door.y + 0.5) * self._cell_size)
             center_x = int((door.x + 0.5) * self._cell_size)
-            
-            # Draw door number
             font_scale = self._cell_size / 30.0
             thickness = max(1, int(self._cell_size / 20))
-            
-            # Draw background circle for better visibility
             radius = max(2, self._cell_size // 4)
             circle_color = (50, 50, 50) if door.is_open else (200, 200, 200)
             cv2.circle(self._render_buffer, (center_x, center_y), radius, circle_color, -1)
-            
-            # Draw door number
             text = str(door.door_number)
             text_size = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness)[0]
             text_x = center_x - text_size[0] // 2
@@ -1396,40 +1395,45 @@ class GridMazeWorld(gym.Env):
 
         # Draw button numbers
         for button in self.buttons:
-            y_start = button.y * self._cell_size
-            x_start = button.x * self._cell_size
             center_y = int((button.y + 0.5) * self._cell_size)
             center_x = int((button.x + 0.5) * self._cell_size)
-            
-            # Draw button number (same as door number)
             font_scale = self._cell_size / 30.0
             thickness = max(1, int(self._cell_size / 20))
-            
-            # Draw background circle
             radius = max(2, self._cell_size // 5)
             circle_color = (200, 0, 0) if button.is_broken else (0, 0, 200)
             cv2.circle(self._render_buffer, (center_x, center_y), radius, circle_color, -1)
-            
-            # Draw button number (same as the door it belongs to)
             door = self.doors[button.door_idx]
             text = str(door.door_number)
             text_size = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness)[0]
             text_x = center_x - text_size[0] // 2
             text_y = center_y + text_size[1] // 2
-            text_color = (255, 255, 255) if button.is_broken else (255, 255, 255)
             cv2.putText(self._render_buffer, text, (text_x, text_y),
-                    cv2.FONT_HERSHEY_SIMPLEX, font_scale, text_color, thickness)
+                    cv2.FONT_HERSHEY_SIMPLEX, font_scale, (255, 255, 255), thickness)
 
         # Draw food sources
         if self.food_sources is not None:
             for i in range(self.food_sources.shape[0]):
-                y, x, _, has_food = self.food_sources[i]
+                y, x, delay, has_food, _ = self.food_sources[i]
+                center_y = int((y + 0.5) * self._cell_size)
+                center_x = int((x + 0.5) * self._cell_size)
                 if has_food:
-                    center_y = int((y + 0.5) * self._cell_size)
-                    center_x = int((x + 0.5) * self._cell_size)
                     radius = max(1, self._cell_size // 3)
                     cv2.circle(self._render_buffer, (center_x, center_y),
                             radius, (0, 255, 0), -1)
+                else:
+                    # Draw countdown number for regenerating food
+                    #if delay > 0:
+                    # Small dark circle behind number for contrast
+                    small_radius = max(1, self._cell_size // 5)
+                    cv2.circle(self._render_buffer, (center_x, center_y), small_radius, (0, 0, 0), -1)
+                    font_scale = self._cell_size / 40.0
+                    thickness = max(1, int(self._cell_size / 30))
+                    text = str(delay)
+                    text_size = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness)[0]
+                    text_x = center_x - text_size[0] // 2
+                    text_y = center_y + text_size[1] // 2
+                    cv2.putText(self._render_buffer, text, (text_x, text_y),
+                                cv2.FONT_HERSHEY_SIMPLEX, font_scale, (255, 255, 255), thickness)
 
         # Draw agent
         ay, ax = int(self.agent_pos[0]), int(self.agent_pos[1])
@@ -1444,39 +1448,9 @@ class GridMazeWorld(gym.Env):
         info += f" | Task: {self.task_class} (Lvl: {self.complexity_level:.1f})"
         info_doors = f"Doors: {len(self.doors)} | Buttons: {len(self.buttons)}"
         cv2.putText(self._render_buffer, info, (10, 15), cv2.QT_FONT_NORMAL, 0.55, (255, 255, 255), 1)
-        
         cv2.putText(self._render_buffer, info_doors, (10, 35), cv2.QT_FONT_NORMAL, 0.55, (255, 255, 255), 1)
 
-        # Draw door/button legend if there are doors
-        """
-        if self.doors:
-            legend_y = 60
-            cv2.putText(self._render_buffer, "Door-Button Mapping:", (10, legend_y),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
-            legend_y += 25
-            
-            for door in self.doors:
-                buttons_for_door = [b for b in self.buttons if b.door_idx == self.doors.index(door)]
-                status = "OPEN" if door.is_open else "CLOSED"
-                button_statuses = []
-                for btn in buttons_for_door:
-                    btn_status = "BROKEN" if btn.is_broken else "OK"
-                    button_statuses.append(btn_status)
-                
-                legend_text = f"Door #{door.door_number}: {status}"
-                if buttons_for_door:
-                    legend_text += f" | Buttons: {', '.join(button_statuses)}"
-                
-                cv2.putText(self._render_buffer, legend_text, (20, legend_y),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
-                legend_y += 20
-                if legend_y > self._render_buffer.shape[0] - 50:
-                    break
-                    
-        """
-
         return self._render_buffer
-
 
 class VectorGridMazeWorld(GridMazeWorld):
     def __init__(self, **kwargs):
