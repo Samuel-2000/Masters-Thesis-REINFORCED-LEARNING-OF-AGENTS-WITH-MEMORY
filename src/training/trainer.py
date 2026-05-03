@@ -15,7 +15,7 @@ from datetime import datetime
 from collections import deque
 
 from src.core.environment import GridMazeWorld
-from src.core.vector_env import VectorizedMazeEnv
+from src.core.env_factory_vector import VectorizedMazeEnv
 from src.core.agent import Agent
 from src.core.utils import setup_logging, seed_everything
 from .losses import PolicyLoss, AuxiliaryLoss
@@ -1570,144 +1570,7 @@ class AdaptiveParallelTrainer(ParallelTrainer):
         print(f"\nModel saved as: {self.base_name}_best.pt")
         print(f"{'='*80}")
     
-    """
-    def train(self):
-        #Main training loop with dynamic complexity adjustments
-        training_config = self.config['training']
-        epochs = training_config['epochs']
-        save_interval = training_config['save_interval']
-        test_interval = training_config['test_interval']
-        
-        start_epoch = len(self.metrics['train_rewards'])
-        
-        # Perform initial test at epoch 0 if never tested before (fresh run)
-        if len(self.metrics['test_epochs']) == 0 and len(self.metrics['test_rewards']) == 0:
-            self.logger.info("Running initial test at epoch 0...")
-            test_metrics = self._test_valid(epochs=4)
-            self.metrics['test_epochs'].append(0)
-            self.metrics['test_rewards'].append(test_metrics['reward'])
-            if test_metrics['reward'] > self.metrics['best_reward']:
-                self.metrics['best_reward'] = test_metrics['reward']
-                self._save_model('best')
-                self.logger.info(f"Initial best model with reward: {test_metrics['reward']:.2f}")
 
-        # If already at or beyond target, skip training
-        if start_epoch >= epochs:
-            self.logger.info(f"Already at epoch {start_epoch} >= {epochs}, no training performed.")
-            self._save_metrics()
-            self._print_training_summary(0)
-            return
-        
-        print("\n🎮 Dynamic Complexity Training Controls:")
-        print("  Press 'v' to visualize current environments")
-        print("  Press 'q' to stop training early")
-        print("=" * 50)
-        
-        cv2.namedWindow('Training Controls', cv2.WINDOW_NORMAL)
-        cv2.resizeWindow('Training Controls', 400, 100)
-        dummy = np.zeros((100, 400, 3), dtype=np.uint8)
-        cv2.putText(dummy, "Press 'v' to visualize", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,255,255),2)
-        cv2.putText(dummy, "Press 'q' to quit", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,255,255),2)
-        cv2.imshow('Training Controls', dummy)
-        cv2.waitKey(1)
-        
-        pbar = tqdm(range(start_epoch, epochs), desc="Training", unit="epoch", initial=start_epoch, total=epochs)
-        start_time = time.time()
-        
-        for epoch in pbar:
-            key = cv2.waitKey(1) & 0xFF
-            if key == ord('v'):
-                self._visualize_current_environments(epoch)
-                cv2.imshow('Training Controls', dummy)
-            elif key == ord('q'):
-                print("\n⚠️ Early stop requested.")
-                self._save_model('interrupted')
-                cv2.destroyAllWindows()
-                break
-
-            if self.complexity_manager.epochs_without_progress >= self.complexity_manager.stagnation_termination:
-                break
-            
-            epoch_start = time.time()
-            coll_start = time.time()
-            experiences = self._collect_experiences_parallel()
-            coll_time = time.time() - coll_start
-            
-            train_start = time.time()
-            train_metrics = self._train_step(experiences)
-            train_time = time.time() - train_start
-            
-            epoch_reward = train_metrics['reward']
-            
-            # Update complexity manager
-            self.complexity_manager.add_performance(epoch_reward)
-            adjustment = self.complexity_manager.adjust_complexity(epoch)
-            if adjustment:
-                self._handle_complexity_adjustment(adjustment, epoch)
-
-            if epoch % self.complexity_manager.performance_window == 0:
-                self.metrics['performance_scores'].append(self.complexity_manager.calculate_performance_score())
-            
-            # Store metrics
-            self.metrics['train_rewards'].append(epoch_reward)
-            self.metrics['train_losses'].append(train_metrics['loss'])
-            self.metrics['timing']['collection'].append(coll_time)
-            self.metrics['timing']['training'].append(train_time)
-            self.metrics['timing']['total'].append(time.time() - epoch_start)
-            self.metrics['complexity_history'].append(self.complexity_manager.get_current_complexity())
-            self.metrics['task_class_history'].append(self.complexity_manager.get_current_task_class())
-            
-            # Test with exact epoch tracking
-            if epoch % test_interval == 0 and epoch != 0:
-                if epoch not in self.metrics['test_epochs']:  # avoid duplicate after resume
-                    test_metrics = self._test_valid(epochs=4)
-                    test_reward = test_metrics['reward']
-                    self.metrics['test_epochs'].append(epoch)
-                    self.metrics['test_rewards'].append(test_reward)
-                    if test_reward > self.metrics['best_reward']:
-                        self.metrics['best_reward'] = test_reward
-                        self._save_model('best')
-                        self.logger.info(f"New best model with reward: {test_reward:.2f}")
-
-            if epoch % save_interval == 0 and epoch != 0:
-                self._save_model(f'epoch_{epoch:06d}')
-            
-            avg_coll = np.mean(self.metrics['timing']['collection'][-10:]) if self.metrics['timing']['collection'] else coll_time
-            avg_train = np.mean(self.metrics['timing']['training'][-10:]) if self.metrics['timing']['training'] else train_time
-            
-            pbar.set_postfix({
-                'reward': f"{epoch_reward:.2f}",
-                'loss': f"{train_metrics['loss']:.4f}",
-                'best': f"{self.metrics['best_reward']:.2f}",
-                'stage': self.complexity_manager.get_current_task_class(),
-                'comp': f"{self.complexity_manager.get_current_complexity():.2f}",
-                'perf': f"{self.complexity_manager.calculate_performance_score():.2f}",
-                'adj': self.complexity_manager.adjustments_made,
-                'eps/s': f"{self.batch_size/(avg_coll+avg_train):.1f}",
-            })
-            
-            self.lr_scheduler.step()
-
-        # Final test only if we actually trained new epochs and the last epoch wasn't already a test epoch
-        if len(self.metrics['train_rewards']) > start_epoch:
-            last_epoch = len(self.metrics['train_rewards']) - 1
-            if last_epoch not in self.metrics['test_epochs']:
-                test_metrics = self._test_valid(epochs=4)
-                test_reward = test_metrics['reward']
-                self.metrics['test_epochs'].append(last_epoch)
-                self.metrics['test_rewards'].append(test_reward)
-                if test_reward > self.metrics['best_reward']:
-                    self.metrics['best_reward'] = test_reward
-                    self._save_model('best')
-                    self.logger.info(f"New best model with reward: {test_reward:.2f}")
-            else:
-                self.logger.info(f"Epoch {last_epoch} already tested, skipping final test.")
-
-        self._save_model('final')
-        self._save_metrics()
-        self._print_training_summary(start_time)
-
-        """
 
 # ============================================================================
 # FACTORY: Return appropriate trainer based on config

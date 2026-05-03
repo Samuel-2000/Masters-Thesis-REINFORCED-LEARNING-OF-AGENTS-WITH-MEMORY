@@ -6,10 +6,9 @@ __pycache__/
 
 *.mp4
 *checkpoint.pt
+!final_checkpoint.pt
+
+
 *.json
-
-
-
-
 *.txt
 *.stats

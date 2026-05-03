@@ -10,10 +10,8 @@ sys.path.insert(0, str(Path(__file__).parent / "src"))
 
 from src.core.agent import Agent
 from src.core.env_factory import EnvironmentFactory
-from src.core.human_agent import HumanAgent
+from src.core.agent_human import HumanAgent
 from src.core.utils import get_model_name_from_path
-from src.evaluation.benchmark import Benchmark
-from src.evaluation.visualization import Visualizer
 from src.training.trainer import Trainer, generate_plots_from_metrics
 from src.core.constants import (
     DEFAULT_GRID_SIZE, DEFAULT_MAX_STEPS, DEFAULT_OBSTACLE_FRACTION,
@@ -30,7 +28,6 @@ def main():
     Path("models").mkdir(exist_ok=True)
     Path("logs").mkdir(exist_ok=True)
     Path("results").mkdir(exist_ok=True)
-    Path("results/benchmarks").mkdir(parents=True, exist_ok=True)
     Path("results/plots").mkdir(parents=True, exist_ok=True)
     Path("results/videos").mkdir(parents=True, exist_ok=True)
 
@@ -166,64 +163,6 @@ def main():
 
             print(f"  Reward: {results['avg_reward']:.2f}, Success: {results['success_rate']:.1f}%, Avg Steps: {results['avg_steps']:.1f}")
 
-
-        """
-        elif args.command == "benchmark":
-            env_config = {
-                "grid_size": 11,
-                "max_steps": 100,
-                "obstacle_fraction": 0.25,
-                "n_food_sources": 4,
-                "food_energy": 10.0,
-                "initial_energy": 30.0,
-                "energy_decay": 0.98,
-                "energy_per_step": 0.1,
-                "render_size": 0,
-                "task_class": args.task_class,
-                "complexity_level": args.complexity_level,
-                "n_doors": args.n_doors,
-                "door_open_duration": 10,
-                "door_close_duration": 20,
-                "n_buttons_per_door": args.n_buttons_per_door,
-                "button_break_probability": args.button_break_probability,
-            }
-            benchmark = Benchmark(models_dir=args.models_dir, output_dir=args.output_dir)
-            benchmark.run(episodes_per_model=args.benchmark_episodes, env_config=env_config, verbose=True)
-
-        elif args.command == "visualize":
-            env_config = {
-                "grid_size": 11,
-                "max_steps": 100,
-                "obstacle_fraction": 0.25,
-                "n_food_sources": 4,
-                "food_energy": 10.0,
-                "initial_energy": 30.0,
-                "energy_decay": 0.98,
-                "energy_per_step": 0.1,
-                "render_size": 512,
-                "task_class": args.task_class,
-                "complexity_level": args.complexity_level,
-                "n_doors": args.n_doors,
-                "door_open_duration": 10,
-                "door_close_duration": 20,
-                "n_buttons_per_door": args.n_buttons_per_door,
-                "button_break_probability": args.button_break_probability,
-            }
-            visualizer = Visualizer(model_path=args.model)
-            visualizer.run(episodes=args.episodes, env_config=env_config,
-                        save_video=args.save_video, save_gif=args.save_gif)
-
-        elif args.command == "compare":
-            from experiments.compare import run_comparison
-            run_comparison(
-                architectures=args.architectures,
-                epochs=args.epochs,
-                trials=args.trials,
-                output_dir=args.output_dir,
-                task_class=args.task_class,
-                complexity_level=args.complexity_level
-            )
-        """
     else:
         print("Please specify a command. Use --help for usage.")
 

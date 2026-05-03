@@ -1086,7 +1086,8 @@ class GridMazeWorld(gym.Env):
         return self._get_observation(), info
 
     """
-    def _init_food_sources(self):
+    # TODO args.invariant_to_fs help: fast food source generation function, but invariant to complexity
+    def _init_food_sources(self): # original simple random (fast, but invariant to complexity)
         empty_cells = np.argwhere(self.grid == TileType.EMPTY)
         if len(empty_cells) == 0 or self.n_food_sources <= 0:
             self.food_sources = np.zeros((0, 4), dtype=np.int32)
@@ -1098,80 +1099,11 @@ class GridMazeWorld(gym.Env):
             regen_time = np.random.randint(MIN_FOOD_REGEN_TIME, MAX_FOOD_REGEN_TIME)
             self.food_sources[i] = [y, x, regen_time, 1]
             self.grid[y, x] = TileType.FOOD_SOURCE
+    """
 
     """
-    
-    def _init_food_sources(self):
-        rng = np.random
-        n_food = self.n_food_sources
-
-        empty_cells = np.argwhere(self.grid == TileType.EMPTY)
-        N = len(empty_cells)
-        if N == 0 or n_food <= 0:
-            self.food_sources = np.zeros((0, 5), dtype=np.int32)
-            return
-
-        n_food = min(n_food, N)
-        size = self.grid_size
-        centre = (size - 1) * 0.5
-        ec = empty_cells.astype(np.float32)
-
-        # Centre-biased pool
-        dist = np.abs(ec[:, 0] - centre) + np.abs(ec[:, 1] - centre)
-        centre_count = min(N, max(n_food, N // 4))
-        centre_pool = np.argpartition(dist, centre_count - 1)[:centre_count]
-        rng.shuffle(centre_pool)
-
-        # Spread pool: regular spatial subsample with random offset
-        k = max(2, int(np.sqrt(N / max(n_food, 1))))
-        oy = rng.randint(0, k)
-        ox = rng.randint(0, k)
-        spread_mask = ((empty_cells[:, 0] - oy) % k == 0) & ((empty_cells[:, 1] - ox) % k == 0)
-        spread_pool = np.flatnonzero(spread_mask)
-        rng.shuffle(spread_pool)
-
-        # Smooth split by complexity
-        c = float(self.complexity_level)
-        n_centre = int((1.0 - c) * n_food)
-        n_centre = max(0, min(n_centre, n_food))
-
-        chosen = np.empty(n_food, dtype=np.int32)
-        used = np.zeros(N, dtype=bool)
-        pos = 0
-
-        if n_centre > 0:
-            centre_part = centre_pool[:n_centre]
-            chosen[:len(centre_part)] = centre_part
-            used[centre_part] = True
-            pos = len(centre_part)
-
-        if pos < n_food:
-            spread_avail = spread_pool[~used[spread_pool]]
-            take = min(n_food - pos, len(spread_avail))
-            if take > 0:
-                part = spread_avail[:take]
-                chosen[pos:pos + take] = part
-                used[part] = True
-                pos += take
-
-        if pos < n_food:
-            remaining = np.flatnonzero(~used)
-            extra = rng.choice(remaining, size=n_food - pos, replace=False)
-            chosen[pos:] = extra
-
-        self.food_sources = np.zeros((n_food, 5), dtype=np.int32)
-        regen = rng.randint(MIN_FOOD_REGEN_TIME, MAX_FOOD_REGEN_TIME, size=n_food)
-
-        for i, idx in enumerate(chosen):
-            y, x = empty_cells[idx]
-            self.food_sources[i] = [y, x, regen[i], 1, 0]
-            self.grid[y, x] = TileType.FOOD_SOURCE
-
-        self._update_food_cache()
-
-
-    """
-    def _init_food_sources(self):
+    # just a placeholder to understand the idea of the function below
+    def _init_food_sources(self): # based on random 1D gaussian sampling and repulsion to make food sources less clustered in levels with high complexity and vice versa (slow)
         empty_cells = [tuple(cell) for cell in np.argwhere(self.grid == TileType.EMPTY)]
         if len(empty_cells) == 0 or self.n_food_sources <= 0:
             self.food_sources = np.zeros((0, 4), dtype=np.int32)
@@ -1244,6 +1176,76 @@ class GridMazeWorld(gym.Env):
         self._update_food_cache()
     """
        
+
+    def _init_food_sources(self):
+        rng = np.random
+        n_food = self.n_food_sources
+
+        empty_cells = np.argwhere(self.grid == TileType.EMPTY)
+        N = len(empty_cells)
+        if N == 0 or n_food <= 0:
+            self.food_sources = np.zeros((0, 5), dtype=np.int32)
+            return
+
+        n_food = min(n_food, N)
+        size = self.grid_size
+        centre = (size - 1) * 0.5
+        ec = empty_cells.astype(np.float32)
+
+        # Centre-biased pool
+        dist = np.abs(ec[:, 0] - centre) + np.abs(ec[:, 1] - centre)
+        centre_count = min(N, max(n_food, N // 4))
+        centre_pool = np.argpartition(dist, centre_count - 1)[:centre_count]
+        rng.shuffle(centre_pool)
+
+        # Spread pool: regular spatial subsample with random offset
+        k = max(2, int(np.sqrt(N / max(n_food, 1))))
+        oy = rng.randint(0, k)
+        ox = rng.randint(0, k)
+        spread_mask = ((empty_cells[:, 0] - oy) % k == 0) & ((empty_cells[:, 1] - ox) % k == 0)
+        spread_pool = np.flatnonzero(spread_mask)
+        rng.shuffle(spread_pool)
+
+        # Smooth split by complexity
+        c = float(self.complexity_level)
+        n_centre = int((1.0 - c) * n_food)
+        n_centre = max(0, min(n_centre, n_food))
+
+        chosen = np.empty(n_food, dtype=np.int32)
+        used = np.zeros(N, dtype=bool)
+        pos = 0
+
+        if n_centre > 0:
+            centre_part = centre_pool[:n_centre]
+            chosen[:len(centre_part)] = centre_part
+            used[centre_part] = True
+            pos = len(centre_part)
+
+        if pos < n_food:
+            spread_avail = spread_pool[~used[spread_pool]]
+            take = min(n_food - pos, len(spread_avail))
+            if take > 0:
+                part = spread_avail[:take]
+                chosen[pos:pos + take] = part
+                used[part] = True
+                pos += take
+
+        if pos < n_food:
+            remaining = np.flatnonzero(~used)
+            extra = rng.choice(remaining, size=n_food - pos, replace=False)
+            chosen[pos:] = extra
+
+        self.food_sources = np.zeros((n_food, 5), dtype=np.int32)
+        regen = rng.randint(MIN_FOOD_REGEN_TIME, MAX_FOOD_REGEN_TIME, size=n_food)
+
+        for i, idx in enumerate(chosen):
+            y, x = empty_cells[idx]
+            self.food_sources[i] = [y, x, regen[i], 1, 0]
+            self.grid[y, x] = TileType.FOOD_SOURCE
+
+        self._update_food_cache()
+
+
 
     def _update_food_cache(self):
         if self.food_sources is None or self.food_sources.shape[0] == 0:

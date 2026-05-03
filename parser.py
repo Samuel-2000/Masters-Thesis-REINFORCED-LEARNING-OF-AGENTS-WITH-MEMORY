@@ -8,10 +8,11 @@ def parse_args():
         Examples:
             # Train with dynamic complexity
             python run.py train --network-type lstm --epochs 10000 --batch-size 64 --lr 0.0005 [--auxiliary-tasks] --dynamic-complexity [--curriculum-stages basic doors buttons complex --performance-window 100 --adjustment-interval 500 --complexity-increase-threshold 0.95 --complexity-decrease-threshold 0.7 --complexity-step 0.05 --min-complexity 0.0 --max-complexity 1.0]
-
+            
             # Train without dynamic complexity (static environment)
             python run.py train --network-type lstm --epochs 10000 --batch-size 64 --lr 0.0005 [--auxiliary-tasks] --task-class doors --complexity-level 0.7 [--n-doors 5]
             python run.py train --network-type lstm --epochs 10000 --batch-size 64 --lr 0.0005 [--auxiliary-tasks] --task-class buttons [--n-doors 5 --n-buttons-per-door 4 --button-break-probability 0.0]
+            python run.py train --network-type lstm --epochs 10000 --batch-size 64 --lr 0.0005 --task-class complex --complexity-level 1.0 --consecutive-episodes 4 --update-per-episode
             
             
             # Test a model statically
