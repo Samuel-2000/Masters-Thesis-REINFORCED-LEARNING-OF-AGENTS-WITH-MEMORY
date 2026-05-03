@@ -75,8 +75,12 @@ def parse_args():
 
     test_parser.add_argument("--model", type=str, default=None, help="Path to trained model (required unless --play)")
     test_parser.add_argument("--play", action="store_true", help="Human play mode (no model needed)")
-    test_parser.add_argument("--visualize", action="store_true", default=False)
+    test_parser.add_argument("--visualize", action="store_true", default=False, help="Enable visualisation (opens window)")
+    test_parser.add_argument("--agent-view", action="store_true", default=False, help="Show only 3x3 neighbourhood around agent")
+    test_parser.add_argument("--fog-of-war", action="store_true", default=False, help="Black out all cells except those already visited")
+    test_parser.add_argument("--show-trail", action="store_true", default=False, help="Draw fading trail of agent's path")
     test_parser.add_argument("--save-video", action="store_true", default=False)
+    test_parser.add_argument("--as-gif", action="store_true", default=False, help="Save video as GIF (instead of MP4)")
     # ---------- test command ----------
 
     for general_parser in [train_parser, test_parser]:
@@ -105,43 +109,6 @@ def parse_args():
     plot_parser.add_argument("--output-dir", type=str, default="results/plots", help="Directory to save generated plots")
 
 
-    """
-    # ---------- benchmark command ----------
-    bench_parser = subparsers.add_parser("benchmark", help="Benchmark models")
-    bench_parser.add_argument("--models-dir", required=True, type=str)
-    bench_parser.add_argument("--benchmark-episodes", required=True, type=int)
-    bench_parser.add_argument("--output-dir", required=True, type=str)
-    bench_parser.add_argument("--task-class", required=True, choices=["basic","doors","buttons","complex"])
-    bench_parser.add_argument("--complexity-level", required=True, type=float)
-    bench_parser.add_argument("--n-doors", required=True, type=int)
-    bench_parser.add_argument("--n-buttons-per-door", required=True, type=int, choices=[0,1,2,3,4])
-    bench_parser.add_argument("--door-periodic", action="store_true")
-    bench_parser.add_argument("--button-break-probability", required=True, type=float)
-
-    # ---------- visualize command ----------
-    viz_parser = subparsers.add_parser("visualize", help="Visualize model performance")
-    viz_parser.add_argument("--model", required=True, type=str)
-    viz_parser.add_argument("--episodes", required=True, type=int)
-    viz_parser.add_argument("--save-video", action="store_true")
-    viz_parser.add_argument("--save-gif", action="store_true")
-    viz_parser.add_argument("--task-class", required=True, choices=["basic","doors","buttons","complex"])
-    viz_parser.add_argument("--complexity-level", required=True, type=float)
-    viz_parser.add_argument("--n-doors", required=True, type=int)
-    viz_parser.add_argument("--n-buttons-per-door", required=True, type=int, choices=[0,1,2,3,4])
-    viz_parser.add_argument("--door-periodic", action="store_true")
-    viz_parser.add_argument("--button-break-probability", required=True, type=float)
-
-    # ---------- compare command ----------
-    compare_parser = subparsers.add_parser("compare", help="Compare architectures")
-    compare_parser.add_argument("--architectures", nargs="+", required=True,
-                                choices=["lstm","transformer","multimemory"])
-    compare_parser.add_argument("--epochs", required=True, type=int)
-    compare_parser.add_argument("--trials", required=True, type=int)
-    compare_parser.add_argument("--output-dir", required=True, type=str)
-    compare_parser.add_argument("--task-class", required=True, choices=["basic","doors","buttons","complex"])
-    compare_parser.add_argument("--complexity-level", required=True, type=float)
-
-    """
 
     args = parser.parse_args()
 

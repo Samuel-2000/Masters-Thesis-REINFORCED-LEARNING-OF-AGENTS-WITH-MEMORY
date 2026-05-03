@@ -8,7 +8,8 @@ import numpy as np
 from typing import Dict, Any
 
 from src.core.constants import Actions
-
+from src.visualization.visualizer import Visualizer
+from pathlib import Path
 
 class HumanAgent:
     """Human-controlled agent using keyboard input"""
@@ -54,20 +55,23 @@ class HumanAgent:
             
             print(f"Invalid key: {chr(key) if key < 128 else key}. Try again.")
     
-    def test(self, env, test_epochs: int, consecutive_episodes: int, grid_change_prob: float, visualize: bool) -> Dict[str, Any]:
-        """Human play with optional consecutive episodes per epoch."""
+
+    def test(self, env, args) -> Dict[str, Any]:
+        """
+        Human play mode with options from args.
+        """
         rewards = []
         success_flags = []
         steps_list = []
-        
+
         print("\n" + "="*60)
         print("HUMAN PLAY MODE STARTED")
         print("="*60)
         print(f"Task Class: {env.task_class}")
         print(f"Complexity Level: {env.complexity_level:.2f}")
         print(f"Max Steps: {env.max_steps}")
-        print(f"Test epochs: {test_epochs}")
-        print(f"Episodes per epoch: {consecutive_episodes}")
+        print(f"Test epochs: {args.epochs}")
+        print(f"Episodes per epoch: {args.consecutive_episodes}")
         print("="*60)
 
         print("\n" + "="*50)
@@ -80,53 +84,57 @@ class HumanAgent:
         print(f"  Press Button: {self.key_descriptions[Actions.BUTTON]}")
         print("  Quit:         Q or Esc")
         print("="*50)
-        
+
         total_episodes = 0
-        
-        for epoch in range(test_epochs):
-            # Start of epoch: full reset (new grid)
+
+        for epoch in range(args.epochs):
             obs, info = env.reset()
-            print(f"\n--- EPOCH {epoch+1}/{test_epochs}: New grid (Type: {env.task_class}, Complexity: {env.complexity_level:.2f}) ---")
-            
-            for ep_in_epoch in range(consecutive_episodes):
+            print(f"\n--- EPOCH {epoch+1}/{args.epochs}: New grid (Type: {env.task_class}, Complexity: {env.complexity_level:.2f}) ---")
+
+            for ep_in_epoch in range(args.consecutive_episodes):
                 if ep_in_epoch > 0:
-                    # Soft reset: same grid, only position/food
-                    print("  Soft reset: same grid, new chance!")
                     obs, info = env.soft_reset()
-                
-                print(f"\nEpisode {total_episodes + 1} (epoch {epoch+1}, episode {ep_in_epoch+1}/{consecutive_episodes})")
+                    print("  Soft reset: same grid, new chance!")
+
+                vid_name = f"human_{env.task_class}_comp_{env.complexity_level:.2f}_ep_{epoch}_{ep_in_epoch}"
+                vid_path = Path("results/videos") / f"{vid_name}.{'gif' if args.as_gif else 'mp4'}" if args.save_video else None
+                viz = Visualizer(env, args.save_video, vid_path, args.agent_view, args.fog_of_war, args.show_trail, args.as_gif)
+
+                print(f"\nEpisode {total_episodes + 1} (epoch {epoch+1}, episode {ep_in_epoch+1}/{args.consecutive_episodes})")
                 episode_reward = 0
                 steps = 0
                 terminated = truncated = False
-                
+
                 while not (terminated or truncated) and steps < env.max_steps:
-                    frame = env.render()
+                    frame = viz.render(steps)
                     if frame is not None:
                         cv2.imshow('Human Play Mode', frame)
-                    
+
                     action = self.act()
                     if action == -1:
                         print("Episode ended early by user.")
                         break
-                    
+
                     obs, reward, terminated, truncated, info = env.step(action)
                     episode_reward += reward
                     steps += 1
                     print(f"Step {steps}: {Actions(action).name}, Reward={reward:.2f}, Energy={info['energy']:.1f}")
-                    
+
                     if terminated or truncated:
                         break
-                
+
+                viz.finalize()
+
                 rewards.append(episode_reward)
                 success_flags.append(steps == env.max_steps)
                 steps_list.append(steps)
-                
+
                 print(f"\nEpisode finished: Reward={episode_reward:.2f}, Steps={steps}/{env.max_steps}, Final Energy={info['energy']:.1f}")
                 cv2.waitKey(1000)
                 total_episodes += 1
-        
+
         cv2.destroyAllWindows()
-        
+
         return {
             'rewards': rewards,
             'success_flags': success_flags,

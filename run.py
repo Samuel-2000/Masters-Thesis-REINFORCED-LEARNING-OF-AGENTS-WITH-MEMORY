@@ -156,10 +156,10 @@ def main():
             print(f"\nTest {idx+1}/{len(test_configs)}: {cfg['task_class']} comp={cfg['complexity_level']:.2f}")
             env = EnvironmentFactory.create_from_config(cfg, test_mode=True)
             if args.play:
-                results = agent.test(env, args.epochs, args.consecutive_episodes, args.grid_change_prob, True)
+                results = agent.test(env, args)
             else:
                 model_name = f"{base_name}_{cfg['task_class']}_comp_{cfg['complexity_level']:.2f}".replace('.','_')
-                results = agent.test(env, args.epochs, args.consecutive_episodes, args.grid_change_prob, args.visualize, args.save_video, model_name, args.seed)
+                results = agent.test(env, args, model_name, args.seed)
 
             print(f"  Reward: {results['avg_reward']:.2f}, Success: {results['success_rate']:.1f}%, Avg Steps: {results['avg_steps']:.1f}")
 
