@@ -1033,6 +1033,58 @@ class GridMazeWorld(gym.Env):
         return obs, info
 
     
+    def soft_reset(self, seed: Optional[int] = None) -> Tuple[np.ndarray, Dict]:
+        """
+        Soft reset: keep grid structure (doors, buttons, food positions, obstacles),
+        but reset agent position, energy, food availability, door/button states.
+        """
+        # Agent to random empty cell
+        empty_cells = np.argwhere(self.grid == TileType.EMPTY)
+        if len(empty_cells) == 0:
+            empty_cells = np.argwhere(self.grid != TileType.OBSTACLE)
+        self.agent_pos = empty_cells[np.random.choice(len(empty_cells))]
+        self.energy = self.initial_energy
+        self.steps = 0
+        self.done = False
+        self.last_action = ENV_ACTIONS_START
+
+        # Reset food sources (all become available, new regeneration delays)
+        if self.food_sources is not None:
+            for i in range(self.food_sources.shape[0]):
+                new_regen = np.random.randint(MIN_FOOD_REGEN_TIME, MAX_FOOD_REGEN_TIME)
+                self.food_sources[i, FOOD_INTERVAL_INDEX] = new_regen
+                self.food_sources[i, FOOD_EXISTS_INDEX] = 1
+                self.food_sources[i, FOOD_COLLECTION_COUNT_INDEX] = 0
+                y, x = self.food_sources[i, 0], self.food_sources[i, 1]
+                self.grid[y, x] = TileType.FOOD_SOURCE
+            self._update_food_cache()
+
+        # Reset doors (closed)
+        for door in self.doors:
+            door.is_open = False
+            door.timer = 0
+            self.grid[door.y, door.x] = TileType.DOOR_CLOSED
+            self.door_open_array[door.y, door.x] = 0
+
+        # Reset buttons (not broken)
+        for button in self.buttons:
+            button.is_broken = False
+            if self.grid[button.y, button.x] == TileType.BUTTON_BROKEN:
+                self.grid[button.y, button.x] = TileType.BUTTON
+
+        self._update_passable_mask()
+
+        info = {
+            'energy': self.energy,
+            'steps': self.steps,
+            'position': self.agent_pos.copy(),
+            'task_class': self.task_class,
+            'complexity_level': self.complexity_level,
+            'n_doors': len(self.doors),
+            'n_buttons': len(self.buttons)
+        }
+        return self._get_observation(), info
+
     """
     def _init_food_sources(self):
         empty_cells = np.argwhere(self.grid == TileType.EMPTY)

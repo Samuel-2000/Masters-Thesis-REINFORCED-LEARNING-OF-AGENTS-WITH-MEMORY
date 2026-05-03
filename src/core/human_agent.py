@@ -54,8 +54,8 @@ class HumanAgent:
             
             print(f"Invalid key: {chr(key) if key < 128 else key}. Try again.")
     
-    def test(self, env, episodes: int) -> Dict[str, Any]:
-        """Test human agent performance"""
+    def test(self, env, test_epochs: int, consecutive_episodes: int, grid_change_prob: float, visualize: bool) -> Dict[str, Any]:
+        """Human play with optional consecutive episodes per epoch."""
         rewards = []
         success_flags = []
         steps_list = []
@@ -66,12 +66,12 @@ class HumanAgent:
         print(f"Task Class: {env.task_class}")
         print(f"Complexity Level: {env.complexity_level:.2f}")
         print(f"Max Steps: {env.max_steps}")
+        print(f"Test epochs: {test_epochs}")
+        print(f"Episodes per epoch: {consecutive_episodes}")
         print("="*60)
 
         print("\n" + "="*50)
-        print("HUMAN CONTROL MODE - Waiting for input...")
-        print("="*50)
-        print("Controls:")
+        print("CONTROLS:")
         print(f"  Move Left:    {self.key_descriptions[Actions.LEFT]}")
         print(f"  Move Right:   {self.key_descriptions[Actions.RIGHT]}")
         print(f"  Move Up:      {self.key_descriptions[Actions.UP]}")
@@ -81,49 +81,49 @@ class HumanAgent:
         print("  Quit:         Q or Esc")
         print("="*50)
         
-        for episode in range(episodes):
-            print(f"\nEpisode {episode + 1}/{episodes}")
-            
+        total_episodes = 0
+        
+        for epoch in range(test_epochs):
+            # Start of epoch: full reset (new grid)
             obs, info = env.reset()
-            episode_reward = 0
-            steps = 0
-            terminated = truncated = False
+            print(f"\n--- EPOCH {epoch+1}/{test_epochs}: New grid (Type: {env.task_class}, Complexity: {env.complexity_level:.2f}) ---")
             
-            while not (terminated or truncated) and steps < env.max_steps:
-                # Render the environment
-                frame = env.render()
-                if frame is not None:
-                    cv2.imshow('Human Play Mode', frame)
+            for ep_in_epoch in range(consecutive_episodes):
+                if ep_in_epoch > 0:
+                    # Soft reset: same grid, only position/food
+                    print("  Soft reset: same grid, new chance!")
+                    obs, info = env.soft_reset()
                 
-                # Get human action
-                action = self.act()
+                print(f"\nEpisode {total_episodes + 1} (epoch {epoch+1}, episode {ep_in_epoch+1}/{consecutive_episodes})")
+                episode_reward = 0
+                steps = 0
+                terminated = truncated = False
                 
-                if action == -1:  # User quit
-                    print("Episode ended early by user.")
-                    break
+                while not (terminated or truncated) and steps < env.max_steps:
+                    frame = env.render()
+                    if frame is not None:
+                        cv2.imshow('Human Play Mode', frame)
+                    
+                    action = self.act()
+                    if action == -1:
+                        print("Episode ended early by user.")
+                        break
+                    
+                    obs, reward, terminated, truncated, info = env.step(action)
+                    episode_reward += reward
+                    steps += 1
+                    print(f"Step {steps}: {Actions(action).name}, Reward={reward:.2f}, Energy={info['energy']:.1f}")
+                    
+                    if terminated or truncated:
+                        break
                 
-                # Take step
-                obs, reward, terminated, truncated, info = env.step(action)
+                rewards.append(episode_reward)
+                success_flags.append(steps == env.max_steps)
+                steps_list.append(steps)
                 
-                episode_reward += reward
-                steps += 1
-                
-                print(f"Step {steps}: Action={Actions(action).name}, "
-                      f"Reward={reward:.2f}, Energy={info['energy']:.1f}")
-                
-                if terminated or truncated:
-                    break
-            
-            rewards.append(episode_reward)
-            success_flags.append(steps == env.max_steps)
-            steps_list.append(steps)
-            
-            print(f"\nEpisode {episode + 1} finished:")
-            print(f"  Total Reward: {episode_reward:.2f}")
-            print(f"  Steps: {steps}/{env.max_steps}")
-            print(f"  Final Energy: {info['energy']:.1f}")
-            
-            cv2.waitKey(1000)  # Pause between episodes
+                print(f"\nEpisode finished: Reward={episode_reward:.2f}, Steps={steps}/{env.max_steps}, Final Energy={info['energy']:.1f}")
+                cv2.waitKey(1000)
+                total_episodes += 1
         
         cv2.destroyAllWindows()
         
@@ -134,5 +134,6 @@ class HumanAgent:
             'avg_reward': np.mean(rewards) if rewards else 0,
             'success_rate': np.mean(success_flags) * 100 if success_flags else 0,
             'avg_steps': np.mean(steps_list) if steps_list else 0,
-            'std_reward': np.std(rewards) if rewards else 0
+            'std_reward': np.std(rewards) if rewards else 0,
+            'total_episodes': total_episodes
         }

@@ -6,6 +6,7 @@ Training module with optimizations, parallel execution, and dynamic complexity
 import torch
 import torch.optim as optim
 import numpy as np
+import random
 from tqdm import tqdm
 from pathlib import Path
 from typing import Dict, Any, Optional, Tuple, List, Deque
@@ -640,6 +641,11 @@ class ParallelTrainer:
             lr_start=training_config['learning_rate'],
             lr_min=1e-6
         )
+
+        self.consecutive_episodes = config['training']['consecutive_episodes']
+        self.grid_change_prob = config['training']['grid_change_prob']
+        self.update_per_episode = config['training']['update_per_episode']
+        self._grid_pool = []   # stores grid configurations (tuples)
         
         # Metrics
         self.metrics = {
@@ -711,26 +717,68 @@ class ParallelTrainer:
             weight_decay=weight_decay
         )
 
-    def _collect_experiences_parallel(self) -> Dict[str, torch.Tensor]:
+
+    def _generate_grid_config(self) -> tuple:
+        """Generate a new random grid configuration based on current environment settings."""
+        env_config = self.get_environment_config()
+        # Use a new random seed (different from any previous)
+        seed = random.randint(0, 2**31 - 1)
+        return (seed,
+                env_config['task_class'],
+                env_config['complexity_level'],
+                env_config.get('n_doors'),
+                env_config.get('n_buttons_per_door'),
+                env_config.get('button_break_probability'))
+
+    def _apply_grid_config(self, config: tuple, reset_hidden: bool = False):
+        """Recreate vectorized environment with given grid config. Optionally reset agent hidden state."""
+        seed, task_class, complexity, n_doors, n_buttons, break_prob = config
+        env_config = self.get_environment_config()
+        env_config.update({
+            'task_class': task_class,
+            'complexity_level': complexity,
+            'n_doors': n_doors,
+            'n_buttons_per_door': n_buttons,
+            'button_break_probability': break_prob
+        })
+        if hasattr(self, 'vector_env'):
+            self.vector_env.close()
+        self.vector_env = VectorizedMazeEnv(
+            num_envs=self.batch_size,
+            env_config=env_config,
+            base_seed=seed
+        )
+        if reset_hidden:
+            self.agent.reset()
+
+
+    def _collect_experiences_parallel(self, full_reset: bool = True) -> Dict[str, torch.Tensor]:
         """
         Collect experiences in parallel across all environments
+        
+        Args:
+            full_reset: If True, do full environment reset (new random grid) and reset agent hidden state.
+                    If False, do soft reset (keep grid layout, only reset agent position/food) and 
+                    keep agent hidden state (allows memory across episodes on same grid).
         """
         max_steps = self.vector_env.envs[0].max_steps
-        self.agent.reset()  # Reset network state once
         
-        # Reset all environments
-        obs_array, _ = self.vector_env.reset()
+        # Decide reset type
+        if full_reset:
+            self.agent.reset()  # Reset network state for new grid
+            # Reset all environments (new random grids)
+            obs_array, _ = self.vector_env.reset()
+        else:
+            # Soft reset: keep grid layout, only reset agent position and food
+            # Do NOT reset agent hidden state
+            obs_array, _ = self.vector_env.soft_reset_all()
         
         # Convert to tensor
         observations = torch.tensor(obs_array, dtype=torch.long).to(self.device)
         observations = observations.unsqueeze(1)  # [B, 1, K]
         
         # Storage
-        all_observations = []
-        all_actions = []
-        all_rewards = []
-        all_energies = []          # energy before each step (target)
-        all_next_obs = []          # observation after each step
+        all_observations, all_actions, all_rewards, all_energies, all_next_obs = [], [], [], [], []
         
         # Run for max_steps or until all environments are done
         active_mask = torch.ones(self.batch_size, dtype=torch.bool, device=self.device)
@@ -794,7 +842,18 @@ class ParallelTrainer:
             'energy_targets': torch.stack(all_energies, dim=1),   # [B,T]
             'next_obs_targets': torch.cat(all_next_obs, dim=1),   # [B,T,K]
         }
-    
+        
+    def _merge_experiences(self, exp1, exp2):
+        """Concatenate two episode batches along time dimension."""
+        merged = {}
+        for key in exp1:
+            merged[key] = torch.cat([exp1[key], exp2[key]], dim=1)
+        return merged
+
+    def _post_epoch_hook(self, epoch: int):
+        """Hook called after each epoch; can be overridden by subclasses."""
+        pass
+
     def _compute_loss(self, 
                      experiences: Dict[str, torch.Tensor]) -> Tuple[torch.Tensor, Dict]:
         """Compute policy loss with auxiliary losses"""
@@ -1070,97 +1129,195 @@ class ParallelTrainer:
         print(f"Final best reward: {self.metrics['best_reward']:.2f}")
         print(f"Model saved as: {self.base_name}_best.pt")
         print(f"{'='*80}")
+        
+    def _visualize_current_environments(self, epoch: int):
+        """Visualize a sample of current training environments"""
+        print(f"\n📸 Visualizing environments at epoch {epoch}")
+        
+        num_to_show = min(4, len(self.vector_env.envs))
+        cell_size = 256
+        padding = 10
+        cols = 2
+        rows = (num_to_show + cols - 1) // cols
+        total_width = cols * cell_size + (cols + 1) * padding
+        total_height = rows * cell_size + (rows + 1) * padding
+        combined = np.zeros((total_height, total_width, 3), dtype=np.uint8)
+        
+        for i in range(num_to_show):
+            env = self.vector_env.envs[i]
+            # Force render by temporarily setting render_size
+            original_size = env.render_size
+            env.render_size = cell_size
+            if hasattr(env, '_render_buffer'):
+                env._render_buffer = None
+            frame = super(type(env), env).render()
+            env.render_size = original_size
+            if frame is None:
+                frame = np.zeros((cell_size, cell_size, 3), dtype=np.uint8)
+                cv2.putText(frame, f"Env {i}", (10,30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,255,255),2)
+            if frame.shape[:2] != (cell_size, cell_size):
+                frame = cv2.resize(frame, (cell_size, cell_size))
+            col = i % cols
+            row = i // cols
+            x = padding + col * (cell_size + padding)
+            y = padding + row * (cell_size + padding)
+            combined[y:y+cell_size, x:x+cell_size] = frame
+        
+        info = f"Doors: {len(self.vector_env.envs[0].doors)}, Buttons: {len(self.vector_env.envs[0].buttons)}"
+        cv2.putText(combined, info, (10,60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200,200,200),1)
+        cv2.imshow('Training Visualization', combined)
+        cv2.waitKey(0)
     
+
+
     def train(self):
-        """Main training loop (no dynamic complexity)"""
         training_config = self.config['training']
         epochs = training_config['epochs']
         save_interval = training_config['save_interval']
         test_interval = training_config['test_interval']
-        
-        start_epoch = len(self.metrics['train_rewards'])
 
-        # Perform initial test at epoch 0 if never tested before (fresh run)
-        if len(self.metrics['test_epochs']) == 0 and len(self.metrics['test_rewards']) == 0:
-            self.logger.info("Running initial test at epoch 0...")
+        start_epoch = len(self.metrics.get('epoch_rewards', []))
+        episode_counter = len(self.metrics['train_rewards'])
+
+        # Initial test
+        if len(self.metrics['test_epochs']) == 0:
             test_metrics = self._test_valid(epochs=4)
             self.metrics['test_epochs'].append(0)
             self.metrics['test_rewards'].append(test_metrics['reward'])
             if test_metrics['reward'] > self.metrics['best_reward']:
                 self.metrics['best_reward'] = test_metrics['reward']
                 self._save_model('best')
-                self.logger.info(f"Initial best model with reward: {test_metrics['reward']:.2f}")
 
-        # If already at or beyond target, skip training
-        if start_epoch >= epochs:
-            self.logger.info(f"Already at epoch {start_epoch} >= {epochs}, no training performed.")
-            self._save_metrics()
-            self._print_training_summary(0)
-            return
-        
-        pbar = tqdm(range(start_epoch, epochs), desc="Training", unit="epoch", initial=start_epoch, total=epochs)
+        # ---------- Visualisation setup ----------
+        print("\n🎮 Visualisation Controls:")
+        print("  Press 'v' to visualise current environments")
+        print("  Press 'q' to stop training early")
+        print("=" * 50)
+        cv2.namedWindow('Training Controls', cv2.WINDOW_NORMAL)
+        cv2.resizeWindow('Training Controls', 400, 100)
+        dummy = np.zeros((100, 400, 3), dtype=np.uint8)
+        cv2.putText(dummy, "Press 'v' to visualise", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,255,255),2)
+        cv2.putText(dummy, "Press 'q' to quit", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,255,255),2)
+        cv2.imshow('Training Controls', dummy)
+        cv2.waitKey(1)   # non‑blocking
+
+        pbar = tqdm(range(start_epoch, epochs), desc="Epochs", unit="epoch")
         start_time = time.time()
-        
-        for epoch in pbar:
-            epoch_start = time.time()
-            coll_start = time.time()
-            experiences = self._collect_experiences_parallel()
-            coll_time = time.time() - coll_start
-            
-            train_start = time.time()
-            train_metrics = self._train_step(experiences)
-            train_time = time.time() - train_start
-            
-            epoch_reward = train_metrics['reward']
-            
-            self.metrics['train_rewards'].append(epoch_reward)
-            self.metrics['train_losses'].append(train_metrics['loss'])
-            self.metrics['timing']['collection'].append(coll_time)
-            self.metrics['timing']['training'].append(train_time)
-            self.metrics['timing']['total'].append(time.time() - epoch_start)
-            
-            # Test with exact epoch tracking
-            if epoch % test_interval == 0 and epoch != 0:
-                if epoch not in self.metrics['test_epochs']:  # avoid duplicate after resume
+
+        try:
+            for epoch in pbar:
+                # ---- Start of epoch: generate first grid, reset everything ----
+                current_config = self._generate_grid_config()
+                self._grid_pool = [current_config]
+                self._apply_grid_config(current_config, reset_hidden=True)
+
+                batched_experiences = None
+                epoch_rewards = []
+
+                # ---- Consecutive episodes loop ----
+                for ep_idx in range(self.consecutive_episodes):
+                    if ep_idx == 0:
+                        full_reset = True               # first episode always full reset
+                    else:
+                        if np.random.random() < self.grid_change_prob:
+                            new_config = self._generate_grid_config()
+                            self._grid_pool.append(new_config)
+                            current_config = new_config
+                            full_reset = True
+                        else:
+                            chosen_config = random.choice(self._grid_pool)
+                            if chosen_config == current_config:
+                                full_reset = False
+                            else:
+                                current_config = chosen_config
+                                full_reset = True
+                        if full_reset:
+                            self._apply_grid_config(current_config, reset_hidden=False)
+
+                    # Collect one episode
+                    experiences = self._collect_experiences_parallel(full_reset=full_reset)
+
+                    if self.update_per_episode:
+                        train_metrics = self._train_step(experiences)
+                        episode_reward = train_metrics['reward']
+                        self.metrics['train_rewards'].append(episode_reward)
+                        self.metrics['train_losses'].append(train_metrics['loss'])
+                        # store auxiliary losses if needed
+                        episode_counter += 1
+                        epoch_rewards.append(episode_reward)
+                        self.lr_scheduler.step()
+                    else:
+                        if batched_experiences is None:
+                            batched_experiences = experiences
+                        else:
+                            batched_experiences = self._merge_experiences(batched_experiences, experiences)
+
+                # If not updating per episode, do one update for the whole epoch
+                if not self.update_per_episode:
+                    train_metrics = self._train_step(batched_experiences)
+                    episode_reward = train_metrics['reward']
+                    self.metrics['train_rewards'].append(episode_reward)
+                    self.metrics['train_losses'].append(train_metrics['loss'])
+                    episode_counter += 1
+                    epoch_rewards = [episode_reward]
+                    self.lr_scheduler.step()
+
+                avg_epoch_reward = np.mean(epoch_rewards) if epoch_rewards else 0
+                self.metrics.setdefault('epoch_rewards', []).append(avg_epoch_reward)
+
+                # ---------- Key handling ----------
+                key = cv2.waitKey(1) & 0xFF
+                if key == ord('v'):
+                    self._visualize_current_environments(epoch)
+                    # Re‑show control window after visualisation (if it was closed)
+                    cv2.imshow('Training Controls', dummy)
+                elif key == ord('q'):
+                    print("\n⚠️ Early stop requested.")
+                    self._save_model('interrupted')
+                    cv2.destroyAllWindows()
+                    break
+
+                # Hook for adaptive trainer (complexity adjustment, stagnation check)
+                self._post_epoch_hook(epoch)
+
+                # Testing and saving
+                if epoch % test_interval == 0 and epoch > 0:
                     test_metrics = self._test_valid(epochs=4)
-                    test_reward = test_metrics['reward']
                     self.metrics['test_epochs'].append(epoch)
-                    self.metrics['test_rewards'].append(test_reward)
-                    if test_reward > self.metrics['best_reward']:
-                        self.metrics['best_reward'] = test_reward
+                    self.metrics['test_rewards'].append(test_metrics['reward'])
+                    if test_metrics['reward'] > self.metrics['best_reward']:
+                        self.metrics['best_reward'] = test_metrics['reward']
                         self._save_model('best')
-                        self.logger.info(f"New best model with reward: {test_reward:.2f}")
 
-            if epoch % save_interval == 0 and epoch != 0:
-                self._save_model(f'epoch_{epoch:06d}')
-            
-            avg_coll = np.mean(self.metrics['timing']['collection'][-10:]) if self.metrics['timing']['collection'] else coll_time
-            avg_train = np.mean(self.metrics['timing']['training'][-10:]) if self.metrics['timing']['training'] else train_time
-            
-            pbar.set_postfix({
-                'reward': f"{train_metrics['reward']:.2f}",
-                'loss': f"{train_metrics['loss']:.4f}",
-                'best': f"{self.metrics['best_reward']:.2f}",
-                'eps/s': f"{self.batch_size/(avg_coll+avg_train):.1f}",
-            })
+                if epoch % save_interval == 0 and epoch > 0:
+                    self._save_model(f'epoch_{epoch:06d}')
 
-            self.lr_scheduler.step()
+                pbar.set_postfix({
+                    'reward': f"{avg_epoch_reward:.2f}",
+                    'best': f"{self.metrics['best_reward']:.2f}",
+                    'episodes': episode_counter,
+                    'pool': len(self._grid_pool),
+                })
 
-        # Final test only if we actually trained new epochs and the last epoch wasn't already a test epoch
-        if len(self.metrics['train_rewards']) > start_epoch:
-            last_epoch = len(self.metrics['train_rewards']) - 1
-            if last_epoch not in self.metrics['test_epochs']:
-                test_metrics = self._test_valid(epochs=4)
-                test_reward = test_metrics['reward']
-                self.metrics['test_epochs'].append(last_epoch)
-                self.metrics['test_rewards'].append(test_reward)
-                if test_reward > self.metrics['best_reward']:
-                    self.metrics['best_reward'] = test_reward
-                    self._save_model('best')
-                    self.logger.info(f"New best model with reward: {test_reward:.2f}")
-            else:
-                self.logger.info(f"Epoch {last_epoch} already tested, skipping final test.")
-        
+        except StopIteration:
+            # This is raised by AdaptiveParallelTrainer._post_epoch_hook on stagnation
+            print("\n🛑 Training stopped due to stagnation (no progress for many epochs).")
+            cv2.destroyAllWindows()
+            self._save_metrics()
+            self._print_training_summary(start_time)
+            return
+
+        cv2.destroyAllWindows()
+
+        # Final test and save
+        if epochs > 0 and epochs-1 not in self.metrics['test_epochs']:
+            test_metrics = self._test_valid(epochs=4)
+            self.metrics['test_epochs'].append(epochs-1)
+            self.metrics['test_rewards'].append(test_metrics['reward'])
+            if test_metrics['reward'] > self.metrics['best_reward']:
+                self.metrics['best_reward'] = test_metrics['reward']
+                self._save_model('best')
+
         self._save_model('final')
         self._save_metrics()
         self._print_training_summary(start_time)
@@ -1211,6 +1368,35 @@ class AdaptiveParallelTrainer(ParallelTrainer):
             self.vector_env.close()
         self.vector_env = self._create_vectorized_env()
     
+    def _post_epoch_hook(self, epoch: int):
+        if not self.complexity_manager.enabled:
+            return
+
+        # Get average performance for this epoch
+        if 'epoch_rewards' in self.metrics and self.metrics['epoch_rewards']:
+            avg_reward = self.metrics['epoch_rewards'][-1]
+            self.complexity_manager.add_performance(avg_reward)
+
+        adjustment = self.complexity_manager.adjust_complexity(epoch)
+        if adjustment:
+            self.logger.info(f"Epoch {epoch}: {adjustment['action']} - "
+                            f"{adjustment['old_stage']} -> {adjustment['new_stage']}, "
+                            f"complexity {adjustment['old_complexity']:.2f} -> {adjustment['new_complexity']:.2f}")
+            self._recreate_vectorized_env()
+            self._grid_pool = []
+
+        # Record complexity history
+        self.metrics['complexity_history'].append(self.complexity_manager.get_current_complexity())
+        self.metrics['task_class_history'].append(self.complexity_manager.get_current_task_class())
+        self.metrics['performance_scores'].append(self.complexity_manager.calculate_performance_score())
+
+        # Stagnation termination
+        if self.complexity_manager.epochs_without_progress >= self.complexity_manager.stagnation_termination:
+            self.logger.info(f"Stagnation termination triggered at epoch {epoch}")
+            self._save_model('stagnation_stop')
+            raise StopIteration("Stagnation termination")
+
+
     def _handle_complexity_adjustment(self, adjustment: Dict[str, Any], epoch: int):
         """React to complexity change"""
         # Log adjustment
@@ -1384,8 +1570,9 @@ class AdaptiveParallelTrainer(ParallelTrainer):
         print(f"\nModel saved as: {self.base_name}_best.pt")
         print(f"{'='*80}")
     
+    """
     def train(self):
-        """Main training loop with dynamic complexity adjustments"""
+        #Main training loop with dynamic complexity adjustments
         training_config = self.config['training']
         epochs = training_config['epochs']
         save_interval = training_config['save_interval']
@@ -1520,6 +1707,7 @@ class AdaptiveParallelTrainer(ParallelTrainer):
         self._save_metrics()
         self._print_training_summary(start_time)
 
+        """
 
 # ============================================================================
 # FACTORY: Return appropriate trainer based on config

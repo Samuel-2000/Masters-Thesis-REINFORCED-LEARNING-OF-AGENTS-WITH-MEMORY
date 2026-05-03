@@ -13,17 +13,18 @@ def parse_args():
             python run.py train --network-type lstm --epochs 10000 --batch-size 64 --lr 0.0005 [--auxiliary-tasks] --task-class doors --complexity-level 0.7 [--n-doors 5]
             python run.py train --network-type lstm --epochs 10000 --batch-size 64 --lr 0.0005 [--auxiliary-tasks] --task-class buttons [--n-doors 5 --n-buttons-per-door 4 --button-break-probability 0.0]
             
-
             
             # Test a model statically
-            python run.py test --model models/lstm_best.pt --episodes 10 [--visualize] --task-class doors --complexity-level 0.7 [--n-doors 5]
+            python run.py test --model models/lstm_best.pt --epochs 10 [--visualize] --task-class doors --complexity-level 0.7 [--n-doors 5]
 
             # dynamic complexity test across stages and complexities
-            python run.py test --model models/lstm_best.pt --episodes 5 --dynamic-complexity [--stages basic doors buttons --complexities 0.0 0.5 1.0]
+            python run.py test --model models/lstm_best.pt --epochs 5 --dynamic-complexity [--stages basic doors buttons --complexities 0.0 0.5 1.0]
+            run.py test --model /models/lstm/no_aux/lstm_64b_0.0005lr/2026-04-30_18-11-03/best.pt --epochs 1 --consecutive-episodes 2 --dynamic-complexity --stages basic doors buttons --visualize --save-video
 
             # Human play mode
-            python run.py test --play --episodes 4 --task-class complex --complexity-level 0.5
-            python run.py test --play --episodes 1 --dynamic-complexity [--stages basic doors buttons --complexities 0.0 0.5 1.0]
+            python run.py test --play --epochs 4 --task-class complex --complexity-level 0.5
+            python run.py test --play --epochs 1 --dynamic-complexity [--stages basic doors buttons --complexities 0.0 0.5 1.0]
+            python run.py test --play --epochs 1 --consecutive-episodes 2 --dynamic-complexity --stages basic doors buttons
 
             # Plot saved metrics
             python run.py plot --experiment-name ./models/lstm/no_aux/lstm_64b_0.0005lr/2026-04-30_22-35-53/lstm_64b_0.0005lr_final_checkpoint.pt
@@ -39,14 +40,14 @@ def parse_args():
     # ---------- train command ----------
     train_parser = subparsers.add_parser("train", help="Train a model")
     train_parser.add_argument("--network-type", required=True, choices=["lstm", "transformer", "multimemory"])
-    train_parser.add_argument("--epochs", required=True, type=int)
     train_parser.add_argument("--batch-size", required=True, type=int)
     train_parser.add_argument("--lr", required=True, type=float)
     train_parser.add_argument("--optimizer", type=str, default=None)
     train_parser.add_argument("--weight-decay", type=float, default=None)
 
-    
     train_parser.add_argument("--auxiliary-tasks", action="store_true", default=False)
+
+    train_parser.add_argument("--update-per-episode", action="store_true", default=False, help="Update after each episode. Use --no-update-per-episode to update once per epoch.")
 
     train_parser.add_argument("--save-dir", type=str, default="models", help="Directory to save models")
     train_parser.add_argument("--experiment-name", type=str, default=None, help="Override experiment name")
@@ -73,26 +74,29 @@ def parse_args():
 
     test_parser.add_argument("--model", type=str, default=None, help="Path to trained model (required unless --play)")
     test_parser.add_argument("--play", action="store_true", help="Human play mode (no model needed)")
-    test_parser.add_argument("--episodes", required=True, type=int)
     test_parser.add_argument("--visualize", action="store_true", default=False)
     test_parser.add_argument("--save-video", action="store_true", default=False)
     # ---------- test command ----------
 
     for general_parser in [train_parser, test_parser]:
+        general_parser.add_argument("--epochs", required=True, type=int)
+        general_parser.add_argument("--consecutive-episodes", type=int, default=1, help="Number of episodes per epoch")
+        general_parser.add_argument("--grid-change-prob", type=float, default=0.0, help="Probability to generate a new grid between episodes (else pick random from pool)")
+
+        general_parser.add_argument("--seed", type=int, default=42, help="Random seed")
+
         general_parser.add_argument("--dynamic-complexity", action="store_true", help="Test across all stages and complexities")
         
-        # Optional filters for dynamic testing
+        # Optional filters for dynamic complexity
         general_parser.add_argument("--complexities", nargs="+", type=float, default=[0.0,0.25,0.5,0.75,1.0])
-        general_parser.add_argument("--stages", nargs="+", choices=["basic","doors","buttons","complex"],
-                                default=["basic","doors","buttons","complex"])
-
+        general_parser.add_argument("--stages", nargs="+", choices=["basic","doors","buttons","complex"], default=["basic","doors","buttons","complex"])
         general_parser.add_argument("--task-class", type=str, choices=["basic","doors","buttons","complex"], default=None)
         general_parser.add_argument("--complexity-level", type=float, default=None)
         general_parser.add_argument("--n-doors", type=int, default=None)
         general_parser.add_argument("--n-buttons-per-door", type=int, choices=[0,1,2,3,4], default=None)
         general_parser.add_argument("--button-break-probability", type=float, default=None)
 
-        general_parser.add_argument("--seed", type=int, default=42, help="Random seed")
+        
 
 
     plot_parser = subparsers.add_parser("plot", help="Plot training metrics from saved data")

@@ -59,6 +59,20 @@ class VectorizedMazeEnv:
         
         return self.observations, infos
     
+    def soft_reset_all(self) -> Tuple[np.ndarray, List[Dict]]:
+        """Soft reset all environments (keep grid layout, reset agent/food)."""
+        infos = []
+        for i, env in enumerate(self.envs):
+            obs, info = env.soft_reset()
+            if i == 0:
+                self.observations = np.zeros((self.num_envs, obs.shape[0]), dtype=obs.dtype)
+            self.observations[i] = obs
+            infos.append(info)
+            self.dones[i] = False
+            self.steps[i] = 0
+            
+        return self.observations, infos
+
     def step(self, actions: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, List[Dict]]:
         """Step all environments in parallel - OPTIMIZED"""
         infos = []

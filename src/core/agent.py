@@ -189,75 +189,104 @@ class Agent:
         print(f"Loaded agent from {path} (strict=False)")
         return agent
     
-    def test(self, env, episodes: int = 10, visualize: bool = False,
-             save_video: bool = False, model_name: str = None) -> Dict[str, Any]:
+
+    def test(self, env, test_epochs: int, consecutive_episodes: int, grid_change_prob: float, 
+            visualize: bool, save_video: bool, 
+            model_name: str, seed: int) -> Dict[str, Any]:
+        """
+        Test the agent over multiple test epochs.
+        
+        Args:
+            env: environment instance
+            test_epochs: total number of test epochs (each epoch = block of consecutive episodes)
+            consecutive_episodes: number of episodes per epoch (same grid, hidden state persists)
+            grid_change_prob: probability to switch to a new grid between episodes within an epoch
+            visualize: show rendering
+            save_video: save video files
+            model_name: base name for video files
+            seed: seed for reproducibility
+        """
         self.network.eval()
-        rewards = []
-        success_flags = []
-        steps_list = []
+        all_rewards = []
+        all_success_flags = []
+        all_steps = []
         
         if model_name is None:
             model_name = f"{self.network_type}_model"
         clean_model_name = model_name.replace('/', '_').replace('\\', '_')
         
-        for episode in range(episodes):
-            obs, info = env.reset()
-            self.reset()
-            episode_reward = 0
-            steps = 0
-            terminated = truncated = False
-            frames = []
-            
-            while not (terminated or truncated) and steps < env.max_steps:
-                if obs.min() < 0 or obs.max() >= VOCAB_SIZE:
-                    print(f"Warning: Invalid observation in episode {episode}, step {steps}")
-                    obs = np.clip(obs, 0, VOCAB_SIZE - 1)
-                
-                action = self.act(obs, training=False)
-                obs, reward, terminated, truncated, info = env.step(action)
-                episode_reward += reward
-                steps += 1
-                
-                if visualize or save_video:
-                    frame = env.render()
-                    if frame is not None:
-                        if save_video:
-                            frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-                            frames.append(frame_bgr)
-                        if visualize:
-                            cv2.imshow('Test', frame)
-                            cv2.waitKey(50)
-                
-                if save_video and frames and (terminated or truncated or steps == env.max_steps):
-                    if frames:
-                        h, w, _ = frames[0].shape
-                        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-                        video_path = f'results/videos/{clean_model_name}_ep_{episode}.mp4'
-                        os.makedirs(os.path.dirname(video_path), exist_ok=True)
-                        if os.path.exists(video_path):
-                            os.remove(video_path)
-                        video_writer = cv2.VideoWriter(video_path, fourcc, 20.0, (w, h))
-                        for frame in frames:
-                            video_writer.write(frame)
-                        video_writer.release()
-                        print(f"✓ Saved video to {video_path}")
-                        frames = []
-            
-            rewards.append(episode_reward)
-            success_flags.append(steps == env.max_steps)
-            steps_list.append(steps)
-            if visualize:
-                cv2.waitKey(500)
+        original_render_size = env.render_size
+        if visualize or save_video:
+            env.render_size = 512
         
+        total_episodes = 0
+        
+        for epoch in range(test_epochs):
+            # Start of epoch: full reset (new random grid) and reset hidden state
+            obs, info = env.reset(seed=seed)
+            self.reset()
+            
+            print(f"\n--- Epoch {epoch+1}/{test_epochs}: New grid (Type: {env.task_class}, Complexity: {env.complexity_level:.2f}) ---")
+            
+            for ep_in_epoch in range(consecutive_episodes):
+                if ep_in_epoch > 0:
+                    # Soft reset: same grid, only position/food reset
+                    # Hidden state NOT reset
+                    obs, info = env.soft_reset()
+                
+                episode_reward = 0
+                steps = 0
+                terminated = truncated = False
+                frames = []
+                
+                while not (terminated or truncated) and steps < env.max_steps:
+                    if obs.min() < 0 or obs.max() >= VOCAB_SIZE:
+                        print(f"Warning: Invalid observation in epoch {epoch}, episode {ep_in_epoch}, step {steps}")
+                        obs = np.clip(obs, 0, VOCAB_SIZE - 1)
+                    
+                    action = self.act(obs, training=False)
+                    obs, reward, terminated, truncated, info = env.step(action)
+                    episode_reward += reward
+                    steps += 1
+                    
+                    if visualize or save_video:
+                        frame = env.render()
+                        if frame is not None:
+                            if save_video:
+                                frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+                                frames.append(frame_bgr)
+                            if visualize:
+                                cv2.imshow('Test', frame)
+                                cv2.waitKey(50)
+                
+                all_rewards.append(episode_reward)
+                all_success_flags.append(steps == env.max_steps)
+                all_steps.append(steps)
+                
+                if save_video and frames:
+                    h, w, _ = frames[0].shape
+                    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+                    video_path = f'results/videos/{clean_model_name}_epoch_{epoch}_ep_{ep_in_epoch}.mp4'
+                    os.makedirs(os.path.dirname(video_path), exist_ok=True)
+                    video_writer = cv2.VideoWriter(video_path, fourcc, 20.0, (w, h))
+                    for frame in frames:
+                        video_writer.write(frame)
+                    video_writer.release()
+                    print(f"✓ Saved video to {video_path}")
+                
+                total_episodes += 1
+        
+        env.render_size = original_render_size
         if visualize:
             cv2.destroyAllWindows()
         
         return {
-            'rewards': rewards,
-            'success_flags': success_flags,
-            'steps': steps_list,
-            'avg_reward': np.mean(rewards),
-            'success_rate': np.mean(success_flags) * 100,
-            'avg_steps': np.mean(steps_list),
-            'std_reward': np.std(rewards)
+            'rewards': all_rewards,
+            'success_flags': all_success_flags,
+            'steps': all_steps,
+            'avg_reward': np.mean(all_rewards) if all_rewards else 0,
+            'success_rate': np.mean(all_success_flags) * 100 if all_success_flags else 0,
+            'avg_steps': np.mean(all_steps) if all_steps else 0,
+            'std_reward': np.std(all_rewards) if all_rewards else 0,
+            'total_episodes': total_episodes
         }

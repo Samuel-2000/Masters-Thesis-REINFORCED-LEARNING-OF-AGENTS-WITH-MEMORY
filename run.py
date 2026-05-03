@@ -125,7 +125,10 @@ def main():
                 "stagnation_termination": args.stagnation_termination,
                 "min_basic_complexity": args.min_basic_complexity,
                 "curriculum_stages": args.curriculum_stages,
-                "auxiliary_tasks": args.auxiliary_tasks
+                "auxiliary_tasks": args.auxiliary_tasks,
+                "consecutive_episodes": args.consecutive_episodes,
+                "grid_change_prob": args.grid_change_prob,
+                "update_per_episode": args.update_per_episode
             },
         }
         trainer = Trainer(config)
@@ -156,11 +159,12 @@ def main():
             print(f"\nTest {idx+1}/{len(test_configs)}: {cfg['task_class']} comp={cfg['complexity_level']:.2f}")
             env = EnvironmentFactory.create_from_config(cfg, test_mode=True)
             if args.play:
-                results = agent.test(env, args.episodes)
+                results = agent.test(env, args.epochs, args.consecutive_episodes, args.grid_change_prob, True)
             else:
                 model_name = f"{base_name}_{cfg['task_class']}_comp_{cfg['complexity_level']:.2f}".replace('.','_')
-                results = agent.test(env, args.episodes, args.visualize, args.save_video, model_name)
-            print(f"  Reward: {results['avg_reward']:.2f}, Success: {results['success_rate']:.1f}%")
+                results = agent.test(env, args.epochs, args.consecutive_episodes, args.grid_change_prob, args.visualize, args.save_video, model_name, args.seed)
+
+            print(f"  Reward: {results['avg_reward']:.2f}, Success: {results['success_rate']:.1f}%, Avg Steps: {results['avg_steps']:.1f}")
 
 
         """
